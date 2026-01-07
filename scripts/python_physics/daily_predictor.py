@@ -9,9 +9,10 @@ primary data sources with cascade fallbacks for missing fields.
 
 OUTPUT FILES:
 -------------
-  output/predictions_nasa_power.csv  - Primary: NASA POWER, Fallback: Solcast → ERA5
-  output/predictions_solcast.csv     - Primary: Solcast, Fallback: NASA → ERA5
-  output/predictions_era5.csv        - Primary: ERA5, Fallback: Solcast → NASA
+  output/predictions_nasa_power.csv  - Primary: NASA POWER, Fallback: Solcast → Open-Meteo → ERA5
+  output/predictions_solcast.csv     - Primary: Solcast, Fallback: Open-Meteo → NASA → ERA5
+  output/predictions_openmeteo.csv   - Primary: Open-Meteo, Fallback: Solcast → NASA → ERA5
+  output/predictions_era5.csv        - Primary: ERA5, Fallback: Solcast → Open-Meteo → NASA
 
 Each file contains:
   timestamp, predicted_power_kw, ghi, dni, dhi, air_temp, wind_speed,
@@ -60,18 +61,25 @@ PROJECT_DIR = SCRIPT_DIR.parent.parent
 CONFIG_PATH = PROJECT_DIR / "config" / "plant_config.json"
 OUTPUT_DIR = PROJECT_DIR / "output"
 
-# Output file paths
+# Output directories for each granularity
+HOURLY_DIR = OUTPUT_DIR / "hourly"
+DAILY_DIR = OUTPUT_DIR / "daily"
+MONTHLY_DIR = OUTPUT_DIR / "monthly"
+
+# Output file paths per source (hourly is the base)
 OUTPUT_FILES = {
-    "nasa": OUTPUT_DIR / "predictions_nasa_power.csv",
-    "solcast": OUTPUT_DIR / "predictions_solcast.csv",
-    "era5": OUTPUT_DIR / "predictions_era5.csv",
+    "nasa": "predictions_nasa_power.csv",
+    "solcast": "predictions_solcast.csv",
+    "openmeteo": "predictions_openmeteo.csv",
+    "era5": "predictions_era5.csv",
 }
 
 # Fallback priority order for each primary source
 FALLBACK_ORDER = {
-    "nasa": ["nasa", "solcast", "era5"],
-    "solcast": ["solcast", "nasa", "era5"],
-    "era5": ["era5", "solcast", "nasa"],
+    "nasa": ["nasa", "solcast", "openmeteo", "era5"],
+    "solcast": ["solcast", "openmeteo", "nasa", "era5"],
+    "openmeteo": ["openmeteo", "solcast", "nasa", "era5"],
+    "era5": ["era5", "solcast", "openmeteo", "nasa"],
 }
 
 
@@ -301,6 +309,73 @@ def fetch_era5_data(lat, lon, start_date, end_date):
         return None
 
 
+def fetch_openmeteo_data(lat, lon, start_date, end_date):
+    """
+    Fetch forecast data from Open-Meteo (free, no API key required).
+    
+    Provides: GHI, DNI, DHI, temperature, wind speed
+    Available for forecasts (up to 16 days ahead) and recent past (~1 week)
+    
+    Returns DataFrame with columns: ghi, dni, dhi, air_temp, wind_speed
+    Index: UTC datetime
+    """
+    import requests
+    
+    try:
+        logger.info("Fetching Open-Meteo data...")
+        
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "direct_normal_irradiance,diffuse_radiation,shortwave_radiation,temperature_2m,wind_speed_10m",
+            "timezone": "UTC",
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d")
+        }
+        
+        resp = requests.get(url, params=params, timeout=30)
+        
+        if resp.status_code != 200:
+            logger.warning(f"Open-Meteo API error: HTTP {resp.status_code}")
+            return None
+        
+        data = resp.json()
+        
+        if "hourly" not in data:
+            logger.warning("Open-Meteo returned unexpected format")
+            return None
+        
+        hourly = data["hourly"]
+        
+        # Build DataFrame
+        df = pd.DataFrame({
+            "time": pd.to_datetime(hourly["time"]),
+            "ghi": hourly.get("shortwave_radiation", [np.nan] * len(hourly["time"])),
+            "dni": hourly.get("direct_normal_irradiance", [np.nan] * len(hourly["time"])),
+            "dhi": hourly.get("diffuse_radiation", [np.nan] * len(hourly["time"])),
+            "air_temp": hourly.get("temperature_2m", [np.nan] * len(hourly["time"])),
+            "wind_speed": hourly.get("wind_speed_10m", [np.nan] * len(hourly["time"])),
+        })
+        
+        # Set index
+        df["time"] = df["time"].dt.tz_localize("UTC")
+        df = df.set_index("time")
+        df.index.name = "period_end"
+        
+        # Clean data - clip negative irradiance
+        for col in ["ghi", "dni", "dhi"]:
+            if col in df.columns:
+                df[col] = df[col].clip(lower=0)
+        
+        logger.info(f"✓ Open-Meteo: {len(df)} records fetched")
+        return df[["ghi", "dni", "dhi", "air_temp", "wind_speed"]]
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Open-Meteo fetch failed: {e}")
+        return None
+
+
 # =====================================================================
 # CASCADE FALLBACK LOGIC
 # =====================================================================
@@ -515,35 +590,164 @@ def compute_pv_power(df, config):
 # FILE APPEND LOGIC
 # =====================================================================
 
-def append_predictions(output_path, new_predictions_df):
+def aggregate_hourly_to_daily(hourly_df):
     """
-    Append new predictions, avoiding duplicates by timestamp.
-    Creates file with headers if doesn't exist.
+    Aggregate hourly predictions to daily totals.
+    
+    Args:
+        hourly_df: DataFrame with hourly predictions (index=timestamp, columns include predicted_power_kw)
+    
+    Returns:
+        DataFrame with daily aggregated data
+    """
+    if hourly_df.empty:
+        return pd.DataFrame(columns=["date", "predicted_energy_kwh", "hours_count", 
+                                      "avg_ghi", "avg_dni", "avg_dhi", "avg_temp", "avg_wind"])
+    
+    # Group by date
+    daily = hourly_df.copy()
+    daily["date"] = daily.index.date
+    
+    # Aggregate
+    agg_dict = {
+        "predicted_power_kw": "sum",  # Sum of hourly kW = kWh for 1-hour intervals
+    }
+    
+    # Add optional columns if present
+    for col in ["ghi", "dni", "dhi"]:
+        if col in daily.columns:
+            agg_dict[col] = "mean"
+    if "air_temp" in daily.columns:
+        agg_dict["air_temp"] = "mean"
+    if "wind_speed" in daily.columns:
+        agg_dict["wind_speed"] = "mean"
+    
+    result = daily.groupby("date").agg(agg_dict).reset_index()
+    
+    # Count hours per day
+    hours_count = daily.groupby("date").size()
+    result["hours_count"] = result["date"].map(hours_count)
+    
+    # Rename columns
+    result = result.rename(columns={
+        "predicted_power_kw": "predicted_energy_kwh",
+        "ghi": "avg_ghi",
+        "dni": "avg_dni", 
+        "dhi": "avg_dhi",
+        "air_temp": "avg_temp",
+        "wind_speed": "avg_wind"
+    })
+    
+    # Set date as index
+    result = result.set_index("date")
+    
+    return result
+
+
+def aggregate_daily_to_monthly(daily_df):
+    """
+    Aggregate daily predictions to monthly totals.
+    
+    Args:
+        daily_df: DataFrame with daily predictions (index=date, columns include predicted_energy_kwh)
+    
+    Returns:
+        DataFrame with monthly aggregated data
+    """
+    if daily_df.empty:
+        return pd.DataFrame(columns=["month", "predicted_energy_kwh", "days_count",
+                                      "avg_ghi", "avg_dni", "avg_dhi", "avg_temp", "avg_wind"])
+    
+    # Convert index to datetime if needed
+    monthly = daily_df.copy()
+    if not isinstance(monthly.index, pd.DatetimeIndex):
+        monthly.index = pd.to_datetime(monthly.index)
+    
+    # Group by month (YYYY-MM format)
+    monthly["month"] = monthly.index.to_period("M").astype(str)
+    
+    # Aggregate
+    agg_dict = {
+        "predicted_energy_kwh": "sum",
+    }
+    
+    # Add optional columns if present
+    for col in ["avg_ghi", "avg_dni", "avg_dhi"]:
+        if col in monthly.columns:
+            agg_dict[col] = "mean"
+    if "avg_temp" in monthly.columns:
+        agg_dict["avg_temp"] = "mean"
+    if "avg_wind" in monthly.columns:
+        agg_dict["avg_wind"] = "mean"
+    
+    result = monthly.groupby("month").agg(agg_dict).reset_index()
+    
+    # Count days per month
+    days_count = monthly.groupby("month").size()
+    result["days_count"] = result["month"].map(days_count)
+    
+    # Set month as index
+    result = result.set_index("month")
+    
+    return result
+
+
+def append_to_file(output_path, new_df, index_col="timestamp"):
+    """
+    Append new data to a file, avoiding duplicates.
     
     Args:
         output_path: Path to output CSV
-        new_predictions_df: DataFrame with new predictions
+        new_df: DataFrame with new data
+        index_col: Name of the index column in file
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     if output_path.exists():
         # Load existing data
-        existing = pd.read_csv(output_path, parse_dates=["timestamp"])
-        existing = existing.set_index("timestamp")
+        existing = pd.read_csv(output_path, parse_dates=[index_col] if index_col == "timestamp" else None)
+        existing = existing.set_index(existing.columns[0])
         
         # Combine, keeping newest for duplicates
-        combined = pd.concat([existing, new_predictions_df])
+        combined = pd.concat([existing, new_df])
         combined = combined[~combined.index.duplicated(keep="last")]
     else:
-        combined = new_predictions_df
+        combined = new_df
     
-    # Sort by timestamp and save
+    # Sort by index and save
     combined = combined.sort_index()
     combined.to_csv(output_path)
     
-    logger.info(f"✓ Saved {len(new_predictions_df)} predictions to {output_path.name}")
-    logger.info(f"  Total records in file: {len(combined)}")
+    return len(combined)
+
+
+def append_predictions(source_name, new_predictions_df):
+    """
+    Append new predictions to hourly, daily, and monthly files.
+    
+    Args:
+        source_name: Data source name (e.g., "nasa", "solcast")
+        new_predictions_df: DataFrame with hourly predictions
+    """
+    filename = OUTPUT_FILES[source_name]
+    
+    # 1. Save hourly data
+    hourly_path = HOURLY_DIR / filename
+    hourly_count = append_to_file(hourly_path, new_predictions_df, "timestamp")
+    logger.info(f"✓ Hourly: {len(new_predictions_df)} new → {hourly_count} total in {hourly_path.name}")
+    
+    # 2. Aggregate and save daily data
+    daily_df = aggregate_hourly_to_daily(new_predictions_df)
+    daily_path = DAILY_DIR / filename
+    daily_count = append_to_file(daily_path, daily_df, "date")
+    logger.info(f"✓ Daily: {len(daily_df)} days → {daily_count} total in {daily_path.name}")
+    
+    # 3. Aggregate and save monthly data
+    monthly_df = aggregate_daily_to_monthly(daily_df)
+    monthly_path = MONTHLY_DIR / filename
+    monthly_count = append_to_file(monthly_path, monthly_df, "month")
+    logger.info(f"✓ Monthly: {len(monthly_df)} months → {monthly_count} total in {monthly_path.name}")
 
 
 # =====================================================================
@@ -584,6 +788,11 @@ Examples:
     )
     
     args = parser.parse_args()
+    
+    # Create output directories
+    HOURLY_DIR.mkdir(parents=True, exist_ok=True)
+    DAILY_DIR.mkdir(parents=True, exist_ok=True)
+    MONTHLY_DIR.mkdir(parents=True, exist_ok=True)
     
     # Load configuration
     config = load_config()
@@ -643,6 +852,11 @@ Examples:
     else:
         logger.warning("⚠️ Solcast API key not configured, skipping Solcast")
     
+    # Open-Meteo (free, no API key - great for forecasts!)
+    openmeteo_data = fetch_openmeteo_data(lat, lon, start_date.date(), end_date.date())
+    if openmeteo_data is not None:
+        all_data["openmeteo"] = openmeteo_data
+    
     # ERA5 (requires CDS API credentials)
     era5_data = fetch_era5_data(lat, lon, start_date.date(), end_date.date())
     if era5_data is not None:
@@ -666,7 +880,7 @@ Examples:
     # PROCESS EACH PRIMARY SOURCE
     # =====================================================================
     
-    for primary_source in ["nasa", "solcast", "era5"]:
+    for primary_source in ["nasa", "solcast", "openmeteo", "era5"]:
         logger.info(f"\n{'='*60}")
         logger.info(f"Processing: {primary_source.upper()} as primary source")
         logger.info(f"Fallback order: {FALLBACK_ORDER[primary_source]}")
@@ -703,9 +917,8 @@ Examples:
             "irradiance_source", "temp_source", "wind_source"
         ]]
         
-        # Append to file
-        output_path = OUTPUT_FILES[primary_source]
-        append_predictions(output_path, output_df)
+        # Append to hourly, daily, and monthly files
+        append_predictions(primary_source, output_df)
         
         # Log summary
         total_energy = (power.clip(lower=0) * 1).sum()  # kWh (1-hour intervals)
@@ -718,12 +931,16 @@ Examples:
     logger.info("\n" + "=" * 60)
     logger.info("DAILY PREDICTOR COMPLETE")
     logger.info("=" * 60)
-    logger.info("Output files:")
-    for source, path in OUTPUT_FILES.items():
-        if path.exists():
-            df = pd.read_csv(path)
-            logger.info(f"  {path.name}: {len(df)} records")
-    logger.info("=" * 60)
+    
+    for granularity, folder in [("Hourly", HOURLY_DIR), ("Daily", DAILY_DIR), ("Monthly", MONTHLY_DIR)]:
+        logger.info(f"\n{granularity} output files:")
+        for source, filename in OUTPUT_FILES.items():
+            path = folder / filename
+            if path.exists():
+                df = pd.read_csv(path)
+                logger.info(f"  {filename}: {len(df)} records")
+    
+    logger.info("\n" + "=" * 60)
 
 
 if __name__ == "__main__":

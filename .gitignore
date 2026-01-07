@@ -1,1 +1,43 @@
-\config\plant_config.json
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Config with API keys (use plant_config_example.json as template)
+config/plant_config.json
+
+# Temporary files
+*.nc
+*.tmp
+era5_temp.nc
+
+# Output files (generated, don't commit)
+output/*.csv
+output/*.json
+output/*.txt
+output/*.png
+output/hourly/*.csv
+output/daily/*.csv
+output/monthly/*.csv
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
