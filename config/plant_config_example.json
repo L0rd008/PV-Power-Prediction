@@ -1,0 +1,78 @@
+{
+  "plant_name": "Example 55kW Rooftop Plant",
+  "description": "Sample configuration - modify for your specific plant",
+  
+  "api": {
+    "solcast_key": "YOUR_SOLCAST_API_KEY",
+    "period": "PT60M"
+  },
+  
+  "location": {
+    "lat": 8.342368984714714,
+    "lon": 80.37623529556957,
+    "altitude_m": 88,
+    "timezone": "Asia/Colombo"
+  },
+  
+  "orientations": [
+    {"tilt": 18, "azimuth": 148, "name": "O1", "module_count": 18},
+    {"tilt": 18, "azimuth": -32, "name": "O2", "module_count": 18},
+    {"tilt": 19, "azimuth": 55, "name": "O3", "module_count": 36},
+    {"tilt": 19, "azimuth": -125, "name": "O4", "module_count": 36},
+    {"tilt": 18, "azimuth": -125, "name": "O5", "module_count": 36},
+    {"tilt": 18, "azimuth": 55, "name": "O6", "module_count": 36},
+    {"tilt": 27, "azimuth": -125, "name": "O7", "module_count": 18},
+    {"tilt": 27, "azimuth": 55, "name": "O8", "module_count": 18}
+  ],
+  
+  "module": {
+    "area_m2": 2.556,
+    "efficiency_stc": 0.2153,
+    "gamma_p": -0.00340
+  },
+  
+  "inverter": {
+    "ac_rating_kw": 55.0,
+    "dc_threshold_kw": 0.0,
+    "use_efficiency_curve": true,
+    "efficiency_curve_kw": [
+      2.43, 4.74, 4.99, 7.18, 9.99, 12.23, 14.92, 17.42, 20.04, 22.28, 24.91,
+      27.53, 30.02, 32.46, 34.96, 37.52, 40.07, 42.57, 45.19, 47.50, 50.00
+    ],
+    "efficiency_curve_eta": [
+      0.95238, 0.97151, 0.97270, 0.97724, 0.98016, 0.98168, 0.98222, 0.98254,
+      0.98276, 0.98286, 0.98276, 0.98254, 0.98222, 0.98189, 0.98146, 0.98103,
+      0.98059, 0.98016, 0.97973, 0.97930, 0.97876
+    ],
+    "flat_efficiency": 0.98
+  },
+  
+  "losses": {
+    "soiling": 0.03,
+    "lid": 0.014,
+    "module_quality": -0.008,
+    "mismatch": 0.017,
+    "dc_wiring": 0.009,
+    "ac_wiring": 0.003,
+    "albedo": 0.20,
+    "far_shading": 1.0
+  },
+  
+  "iam": {
+    "angles": [0, 25, 45, 60, 65, 70, 75, 80, 90],
+    "values": [1.000, 1.000, 0.995, 0.962, 0.936, 0.903, 0.851, 0.754, 0.000]
+  },
+  
+  "thermal_model": "close_mount_glass_glass",
+  
+  "defaults": {
+    "wind_speed_ms": 1.0,
+    "air_temp_c": 25.0
+  },
+  
+  "date_range": {
+    "start": "2025-12-10T00:00:00Z",
+    "end": "2025-12-16T23:00:00Z"
+  }
+}
+
