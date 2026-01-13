@@ -10861,11 +10861,11 @@
   ],
   "timing": {
     "physics_js": {
-      "total_ms": 4,
+      "total_ms": 8,
       "predictions": 1357
     },
     "surrogate_js": {
-      "total_ms": 3,
+      "total_ms": 6,
       "predictions": 1357
     }
   }

@@ -606,7 +606,8 @@ def aggregate_hourly_to_daily(hourly_df):
     
     # Group by date
     daily = hourly_df.copy()
-    daily["date"] = daily.index.date
+    # Normalize to date for grouping; keep as Timestamp for consistent typing later
+    daily["date"] = pd.to_datetime(daily.index.date)
     
     # Aggregate
     agg_dict = {
@@ -640,6 +641,7 @@ def aggregate_hourly_to_daily(hourly_df):
     
     # Set date as index
     result = result.set_index("date")
+    result.index.name = "date"
     
     return result
 
@@ -688,8 +690,31 @@ def aggregate_daily_to_monthly(daily_df):
     
     # Set month as index
     result = result.set_index("month")
+    result.index.name = "month"
     
     return result
+
+
+def _normalize_index(df, index_col):
+    """
+    Ensure consistent index dtype before concat/sort/save.
+    
+    - timestamp: DatetimeIndex (retain tz if present)
+    - date: string YYYY-MM-DD
+    - month: string YYYY-MM
+    """
+    df = df.copy()
+    if index_col == "timestamp":
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, utc=True)
+        df.index.name = "timestamp"
+    elif index_col == "date":
+        df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
+        df.index.name = "date"
+    elif index_col == "month":
+        df.index = pd.to_datetime(df.index).to_period("M").astype(str)
+        df.index.name = "month"
+    return df
 
 
 def append_to_file(output_path, new_df, index_col="timestamp"):
@@ -704,10 +729,15 @@ def append_to_file(output_path, new_df, index_col="timestamp"):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
+    # Normalize new data index
+    new_df = _normalize_index(new_df, index_col)
+    
     if output_path.exists():
-        # Load existing data
-        existing = pd.read_csv(output_path, parse_dates=[index_col] if index_col == "timestamp" else None)
+        # Load existing data; parse index as needed
+        parse_dates = [0] if index_col in ["timestamp", "date", "month"] else None
+        existing = pd.read_csv(output_path, parse_dates=parse_dates)
         existing = existing.set_index(existing.columns[0])
+        existing = _normalize_index(existing, index_col)
         
         # Combine, keeping newest for duplicates
         combined = pd.concat([existing, new_df])

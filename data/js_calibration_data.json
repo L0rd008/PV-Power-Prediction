@@ -1,0 +1,13 @@
+{
+  "samples": 2500000,
+  "seed": 42,
+  "created_at": "2026-01-13T11:24:12.028000",
+  "plant_name": "Example 55kW Rooftop Plant",
+  "inverter_rating_kw": 55.0,
+  "statistics": {
+    "nonzero_samples": 2483662,
+    "ac_power_min": 0.0,
+    "ac_power_max": 54.835,
+    "ac_power_mean_nonzero": 16.237923748704116
+  }
+}
