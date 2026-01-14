@@ -24,17 +24,23 @@ USAGE:
   # Fetch from Solcast API (estimated_actuals - last 7 days)
   python physics_model.py --source api --endpoint estimated_actuals
 
-  # Read from local CSV file
+  # Read from local CSV file (hourly data)
   python physics_model.py --source csv
 
-  # Read from custom CSV path
+  # Read from custom CSV path (hourly data)
   python physics_model.py --source csv --csv-path ../data/custom.csv
 
   # Fetch from NASA POWER hourly (free, no API key needed)
   python physics_model.py --source nasa_power --start 20251201 --end 20251215
 
-  # Fetch from NASA POWER daily (simplified model, quick estimates)
+  # Read from daily CSV file (full physics via synthetic hourly profiles)
+  python physics_model.py --source csv_daily --csv-path ../data/daily.csv
+
+  # Fetch from NASA POWER daily (full physics via synthetic hourly profiles)
   python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215
+
+  # Use simplified daily model (faster, less accurate)
+  python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215 --simplified
 
   # Show help
   python physics_model.py --help
@@ -643,6 +649,83 @@ def load_csv_data(csv_path):
     return df
 
 
+def load_csv_daily_data(csv_path):
+    """
+    Load daily irradiance data from local CSV file.
+    
+    Parameters:
+    -----------
+    csv_path : str or Path
+        Path to CSV file containing daily irradiance data
+    
+    Returns:
+    --------
+    pd.DataFrame with DatetimeIndex (daily) and columns:
+        - ghi_kwh_m2_day: Daily GHI in kWh/m²/day
+        - dni_kwh_m2_day: Daily DNI in kWh/m²/day (optional)
+        - dhi_kwh_m2_day: Daily DHI in kWh/m²/day (optional)
+        - temp_c_daily: Daily average temperature in °C (optional)
+        - wind_mps_daily: Daily average wind speed in m/s (optional)
+    """
+    print(f"Loading daily irradiance data from CSV: {csv_path}")
+    df = pd.read_csv(csv_path)
+    
+    # Find date/timestamp column
+    date_col_candidates = ["date", "time", "timestamp", "datetime", "day"]
+    
+    date_col = None
+    for col in date_col_candidates:
+        if col in df.columns:
+            date_col = col
+            break
+    
+    if date_col is None:
+        raise RuntimeError("No valid date column found in CSV. Expected one of: " + 
+                          ", ".join(date_col_candidates))
+    
+    # Parse dates and set as index
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.set_index(date_col)
+    df = df.sort_index()
+    
+    # Check for required columns - support multiple naming conventions
+    ghi_col_candidates = ["ghi_kwh_m2_day", "ghi_daily", "ghi", "ALLSKY_SFC_SW_DWN"]
+    dni_col_candidates = ["dni_kwh_m2_day", "dni_daily", "dni", "ALLSKY_SFC_SW_DNI"]
+    dhi_col_candidates = ["dhi_kwh_m2_day", "dhi_daily", "dhi", "ALLSKY_SFC_SW_DIFF"]
+    temp_col_candidates = ["temp_c_daily", "temp_daily", "temperature", "air_temp", "T2M"]
+    wind_col_candidates = ["wind_mps_daily", "wind_daily", "wind_speed", "WS10M"]
+    
+    def find_and_rename(df, candidates, target_name):
+        """Find column from candidates and rename to target."""
+        for col in candidates:
+            if col in df.columns:
+                if col != target_name:
+                    df = df.rename(columns={col: target_name})
+                return df, True
+        return df, False
+    
+    # Map columns to standard names
+    df, has_ghi = find_and_rename(df, ghi_col_candidates, "ghi_kwh_m2_day")
+    df, has_dni = find_and_rename(df, dni_col_candidates, "dni_kwh_m2_day")
+    df, has_dhi = find_and_rename(df, dhi_col_candidates, "dhi_kwh_m2_day")
+    df, has_temp = find_and_rename(df, temp_col_candidates, "temp_c_daily")
+    df, has_wind = find_and_rename(df, wind_col_candidates, "wind_mps_daily")
+    
+    if not has_ghi:
+        raise RuntimeError(f"CSV missing required GHI column. Expected one of: {ghi_col_candidates}")
+    
+    # Log what was found
+    print(f"  GHI: {'✓' if has_ghi else '✗'}")
+    print(f"  DNI: {'✓' if has_dni else '✗ (will be estimated)'}")
+    print(f"  DHI: {'✓' if has_dhi else '✗ (will be estimated)'}")
+    print(f"  Temperature: {'✓' if has_temp else '✗ (using default)'}")
+    print(f"  Wind speed: {'✓' if has_wind else '✗ (using default)'}")
+    
+    print(f"✓ Loaded {len(df)} daily records from {df.index.min()} to {df.index.max()}")
+    
+    return df
+
+
 # =====================================================================
 # 5) WEATHER DATA PROCESSING
 # =====================================================================
@@ -937,6 +1020,157 @@ def calculate_daily_energy_simple(df_daily):
 
 
 # =====================================================================
+# 6c) SYNTHETIC HOURLY PROFILE GENERATOR (for daily data → full physics)
+# =====================================================================
+
+def generate_synthetic_hourly_from_daily(df_daily):
+    """
+    Generate synthetic hourly irradiance profiles from daily totals.
+    
+    Uses pvlib clear-sky models to create realistic temporal distributions,
+    then scales them to match measured daily totals. This allows the full
+    physics model to be applied to daily data.
+    
+    Parameters:
+    -----------
+    df_daily : pd.DataFrame
+        Daily data with DatetimeIndex and columns:
+        - ghi_kwh_m2_day: Daily GHI in kWh/m²/day
+        - dni_kwh_m2_day: Daily DNI in kWh/m²/day
+        - dhi_kwh_m2_day: Daily DHI in kWh/m²/day
+        - temp_c_daily: Daily average temperature in °C (optional)
+        - wind_mps_daily: Daily average wind speed in m/s (optional)
+    
+    Returns:
+    --------
+    pd.DataFrame with hourly data (DatetimeIndex UTC) and columns:
+        ghi, dni, dhi (W/m²), air_temp (°C), wind_speed (m/s)
+    """
+    print("\n" + "="*60)
+    print("SYNTHETIC HOURLY PROFILE GENERATOR")
+    print("="*60)
+    print("Converting daily irradiance to synthetic hourly profiles...")
+    print("Using pvlib Ineichen clear-sky model for temporal distribution")
+    print("="*60 + "\n")
+    
+    # Create site location for clear-sky calculation
+    site = Location(
+        lat, lon,
+        altitude=SITE_ALTITUDE_M if SITE_ALTITUDE_M is not None else 0
+    )
+    
+    # Collect all hourly data
+    hourly_records = []
+    
+    for day_idx, row in df_daily.iterrows():
+        # Parse the day (handle both datetime and date objects)
+        if hasattr(day_idx, 'date'):
+            day = day_idx.date() if hasattr(day_idx, 'date') else day_idx
+        else:
+            day = pd.to_datetime(day_idx).date()
+        
+        # Get daily irradiance totals (kWh/m²/day)
+        ghi_daily = row.get("ghi_kwh_m2_day", np.nan)
+        dni_daily = row.get("dni_kwh_m2_day", np.nan)
+        dhi_daily = row.get("dhi_kwh_m2_day", np.nan)
+        
+        # Get weather data (use defaults if not available)
+        temp_daily = row.get("temp_c_daily", DEFAULT_AIR_TEMP_C)
+        wind_daily = row.get("wind_mps_daily", DEFAULT_WIND_SPEED_MS)
+        
+        if pd.isna(temp_daily):
+            temp_daily = DEFAULT_AIR_TEMP_C
+        if pd.isna(wind_daily):
+            wind_daily = DEFAULT_WIND_SPEED_MS
+        
+        # Skip days with invalid irradiance
+        if pd.isna(ghi_daily) or ghi_daily <= 0:
+            print(f"  Skipping {day}: invalid GHI data")
+            continue
+        
+        # Generate hourly timestamps for this day (UTC)
+        day_start = pd.Timestamp(day, tz="UTC")
+        hourly_times = pd.date_range(
+            start=day_start,
+            end=day_start + pd.Timedelta(hours=23),
+            freq="h"
+        )
+        
+        # Get clear-sky irradiance for this day
+        clearsky = site.get_clearsky(hourly_times, model="ineichen")
+        
+        # Calculate clear-sky daily totals (W/m² → kWh/m²/day, 1 hour per step)
+        cs_ghi_total = clearsky["ghi"].sum() / 1000  # W·h/m² → kWh/m²
+        cs_dni_total = clearsky["dni"].sum() / 1000
+        cs_dhi_total = clearsky["dhi"].sum() / 1000
+        
+        # Handle edge cases: very cloudy days or nighttime-only data
+        MIN_CLEARSKY_THRESHOLD = 0.01  # kWh/m²/day
+        
+        # Calculate scaling factors (measured / clear-sky)
+        if cs_ghi_total > MIN_CLEARSKY_THRESHOLD:
+            ghi_scale = ghi_daily / cs_ghi_total
+        else:
+            ghi_scale = 0.0
+        
+        if cs_dni_total > MIN_CLEARSKY_THRESHOLD and not pd.isna(dni_daily):
+            dni_scale = dni_daily / cs_dni_total
+        else:
+            # If DNI not provided or clear-sky is zero, estimate from GHI
+            dni_scale = ghi_scale * 0.7 if not pd.isna(dni_daily) else 0.0
+        
+        if cs_dhi_total > MIN_CLEARSKY_THRESHOLD and not pd.isna(dhi_daily):
+            dhi_scale = dhi_daily / cs_dhi_total
+        else:
+            # If DHI not provided, estimate as remainder
+            dhi_scale = ghi_scale * 0.3 if not pd.isna(dhi_daily) else ghi_scale
+        
+        # Apply scaling to get synthetic hourly values (W/m²)
+        ghi_hourly = clearsky["ghi"] * ghi_scale
+        dni_hourly = clearsky["dni"] * dni_scale
+        dhi_hourly = clearsky["dhi"] * dhi_scale
+        
+        # Clamp negative values (can occur with unusual scaling)
+        ghi_hourly = ghi_hourly.clip(lower=0)
+        dni_hourly = dni_hourly.clip(lower=0)
+        dhi_hourly = dhi_hourly.clip(lower=0)
+        
+        # Build hourly records for this day
+        for i, ts in enumerate(hourly_times):
+            hourly_records.append({
+                "timestamp": ts,
+                "ghi": ghi_hourly.iloc[i],
+                "dni": dni_hourly.iloc[i],
+                "dhi": dhi_hourly.iloc[i],
+                "air_temp": temp_daily,  # Constant for the day
+                "wind_speed": wind_daily,  # Constant for the day
+            })
+    
+    if not hourly_records:
+        raise RuntimeError("No valid daily data to convert to hourly profiles")
+    
+    # Create DataFrame from records
+    df_hourly = pd.DataFrame(hourly_records)
+    df_hourly = df_hourly.set_index("timestamp")
+    df_hourly.index = pd.DatetimeIndex(df_hourly.index, tz="UTC")
+    df_hourly = df_hourly.sort_index()
+    
+    # Summary statistics
+    total_days = len(df_daily)
+    valid_days = len(df_hourly) // 24
+    
+    print(f"✓ Generated synthetic hourly profiles")
+    print(f"  Input days: {total_days}")
+    print(f"  Valid days processed: {valid_days}")
+    print(f"  Total hourly records: {len(df_hourly)}")
+    print(f"  GHI range: {df_hourly['ghi'].min():.1f} - {df_hourly['ghi'].max():.1f} W/m²")
+    print(f"  DNI range: {df_hourly['dni'].min():.1f} - {df_hourly['dni'].max():.1f} W/m²")
+    print(f"  DHI range: {df_hourly['dhi'].min():.1f} - {df_hourly['dhi'].max():.1f} W/m²")
+    
+    return df_hourly
+
+
+# =====================================================================
 # 7) MAIN EXECUTION
 # =====================================================================
 
@@ -951,15 +1185,19 @@ Examples:
   python physics_model.py --source api --endpoint estimated_actuals
   python physics_model.py --source csv
   python physics_model.py --source csv --csv-path ../data/custom.csv
+  python physics_model.py --source csv_daily --csv-path ../data/daily.csv
+  python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215
+  python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215 --simplified
         """
     )
     
     parser.add_argument(
         "--source",
-        choices=["api", "csv", "nasa_power", "nasa_power_daily"],
+        choices=["api", "csv", "csv_daily", "nasa_power", "nasa_power_daily"],
         default="csv",
-        help="Data source: 'api' for Solcast API, 'csv' for local file, "
-             "'nasa_power' for NASA POWER hourly, 'nasa_power_daily' for daily (default: csv)"
+        help="Data source: 'api' for Solcast API, 'csv' for hourly CSV, "
+             "'csv_daily' for daily CSV, 'nasa_power' for NASA POWER hourly, "
+             "'nasa_power_daily' for NASA POWER daily (default: csv)"
     )
     
     parser.add_argument(
@@ -993,6 +1231,13 @@ Examples:
         help="Output CSV path"
     )
     
+    parser.add_argument(
+        "--simplified",
+        action="store_true",
+        help="Use simplified daily model instead of synthetic hourly profiles "
+             "(only for daily sources: csv_daily, nasa_power_daily)"
+    )
+    
     args = parser.parse_args()
     
     print("\n" + "="*60)
@@ -1001,10 +1246,15 @@ Examples:
     print(f"Data source: {args.source}")
     if args.source == "api":
         print(f"API endpoint: {args.endpoint}")
-    elif args.source == "csv":
+    elif args.source in ["csv", "csv_daily"]:
         print(f"CSV path: {args.csv_path}")
-    elif args.source in ["nasa_power", "nasa_power_daily"]:
+    if args.source in ["nasa_power", "nasa_power_daily"]:
         print(f"NASA POWER dates: {args.start} to {args.end}")
+    if args.source in ["csv_daily", "nasa_power_daily"]:
+        if args.simplified:
+            print("Model: Simplified daily (fast, less accurate)")
+        else:
+            print("Model: Full physics via synthetic hourly profiles")
     print(f"Far-shading factor: {far_shading}")
     print("="*60 + "\n")
     
@@ -1047,8 +1297,43 @@ Examples:
         if "wind_speed_10m" in df.columns:
             df = df.rename(columns={"wind_speed_10m": "wind_speed"})
     
+    elif args.source == "csv_daily":
+        # Load daily data from CSV file
+        df_daily = load_csv_daily_data(args.csv_path)
+        
+        if args.simplified:
+            # Use simplified daily model (fast, less accurate)
+            daily_energy = calculate_daily_energy_simple(df_daily)
+            
+            # Convert to local timezone for output
+            daily_energy_local = daily_energy.tz_localize(TIMEZONE)
+            
+            # Save output
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            out = pd.DataFrame({"energy_kWh": daily_energy_local})
+            out.to_csv(output_path)
+            
+            # Results summary
+            print("\n" + "="*60)
+            print("RESULTS (DAILY SIMPLIFIED MODEL)")
+            print("="*60)
+            print(f"Output saved: {output_path}")
+            print(f"Total energy (kWh): {daily_energy.sum():.1f}")
+            print(f"Period: {df_daily.index.min()} to {df_daily.index.max()}")
+            print("="*60)
+            
+            print("\nDaily energy output:")
+            print(out)
+            
+            return daily_energy
+        else:
+            # Use full physics model via synthetic hourly profiles
+            df = generate_synthetic_hourly_from_daily(df_daily)
+    
     elif args.source == "nasa_power_daily":
-        # Fetch daily data from NASA POWER and use simplified model
+        # Fetch daily data from NASA POWER
         if not args.start or not args.end:
             print("⚠️ ERROR: --start and --end required for NASA POWER source")
             print("   Example: --start 20251201 --end 20251215")
@@ -1056,32 +1341,36 @@ Examples:
         
         df_daily = fetch_nasa_power_daily(lat, lon, args.start, args.end)
         
-        # Use simplified daily model
-        daily_energy = calculate_daily_energy_simple(df_daily)
-        
-        # Convert to local timezone for output
-        daily_energy_local = daily_energy.tz_localize(TIMEZONE)
-        
-        # Save output
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        out = pd.DataFrame({"energy_kWh": daily_energy_local})
-        out.to_csv(output_path)
-        
-        # Results summary
-        print("\n" + "="*60)
-        print("RESULTS (DAILY SIMPLIFIED MODEL)")
-        print("="*60)
-        print(f"Output saved: {output_path}")
-        print(f"Total energy (kWh): {daily_energy.sum():.1f}")
-        print(f"Period: {df_daily.index.min()} to {df_daily.index.max()}")
-        print("="*60)
-        
-        print("\nDaily energy output:")
-        print(out)
-        
-        return daily_energy
+        if args.simplified:
+            # Use simplified daily model (fast, less accurate)
+            daily_energy = calculate_daily_energy_simple(df_daily)
+            
+            # Convert to local timezone for output
+            daily_energy_local = daily_energy.tz_localize(TIMEZONE)
+            
+            # Save output
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            out = pd.DataFrame({"energy_kWh": daily_energy_local})
+            out.to_csv(output_path)
+            
+            # Results summary
+            print("\n" + "="*60)
+            print("RESULTS (DAILY SIMPLIFIED MODEL)")
+            print("="*60)
+            print(f"Output saved: {output_path}")
+            print(f"Total energy (kWh): {daily_energy.sum():.1f}")
+            print(f"Period: {df_daily.index.min()} to {df_daily.index.max()}")
+            print("="*60)
+            
+            print("\nDaily energy output:")
+            print(out)
+            
+            return daily_energy
+        else:
+            # Use full physics model via synthetic hourly profiles
+            df = generate_synthetic_hourly_from_daily(df_daily)
         
     else:
         # Load from CSV

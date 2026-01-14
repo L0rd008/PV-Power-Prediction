@@ -36,15 +36,26 @@ Edit `config/plant_config.json` with your solar plant parameters (location, modu
 ```bash
 cd scripts/python_physics
 
-# Using free NASA POWER data (no API key needed)
+# Using free NASA POWER hourly data (no API key needed)
 python physics_model.py --source nasa_power --start 20251201 --end 20251215
 
-# Using local CSV file
+# Using free NASA POWER daily data (full physics via synthetic hourly profiles)
+python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215
+
+# Using local CSV file (hourly data)
 python physics_model.py --source csv
+
+# Using local CSV file (daily data, full physics via synthetic hourly profiles)
+python physics_model.py --source csv_daily --csv-path ../data/daily.csv
 
 # Using Solcast API (requires API key)
 python physics_model.py --source api
+
+# Use simplified daily model for faster but less accurate results (daily sources only)
+python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215 --simplified
 ```
+
+**Note:** Daily data sources (`csv_daily`, `nasa_power_daily`) use synthetic hourly profiles generated from daily totals, enabling the full physics model for better accuracy. Use `--simplified` for faster but less accurate daily calculations.
 
 Output is saved to `output/pv_generation.csv`.
 
@@ -305,7 +316,7 @@ python run_benchmark.py --data-source nasa_power --start 20251210 --end 20251215
 
 | File | Purpose | When to Use |
 |------|---------|-------------|
-| `scripts/python_physics/physics_model.py` | Full pvlib physics model (ground truth) | Engineering validation, training data |
+| `scripts/python_physics/physics_model.py` | Full pvlib physics model (ground truth). Supports both hourly and daily data. Daily data uses synthetic hourly profiles for full physics accuracy. Use `--simplified` flag for faster daily calculations. | Engineering validation, training data, daily or hourly irradiance |
 | `scripts/python_physics/daily_predictor.py` | Automated daily predictions with fallbacks | Production daily forecasts |
 | `scripts/js_physics/physics_model.js` | Simplified physics for ThingsBoard | Real-time SCADA monitoring |
 | `scripts/js_surrogate/surrogate_model.js` | Fast regression model | High-frequency predictions |
@@ -354,6 +365,8 @@ python run_benchmark.py --data-source nasa_power --start 20251210 --end 20251215
 | **Open-Meteo** | Not required | Hourly | Free | Forecasts (16 days ahead) |
 | **ERA5** | CDS API required | Hourly | Free | Weather validation |
 
+**Resolution Options:** The physics model supports both hourly and daily data. Daily data sources (`csv_daily`, `nasa_power_daily`) use synthetic hourly profiles generated from daily totals via pvlib clear-sky models, enabling full physics calculations with better accuracy than simplified daily models. Use `--simplified` flag for faster but less accurate daily calculations.
+
 ### NASA POWER (Recommended for Free Access)
 
 NASA POWER provides satellite-derived irradiance from 1981 to ~7 days ago.
@@ -361,11 +374,13 @@ NASA POWER provides satellite-derived irradiance from 1981 to ~7 days ago.
 ```bash
 cd scripts/python_physics
 
-# Fetch hourly data
+# Fetch hourly data (direct physics model)
 python fetch_nasa_power.py --start 20251201 --end 20251215 --mode hourly
+python physics_model.py --source nasa_power --start 20251201 --end 20251215
 
-# Fetch daily data
+# Fetch daily data (full physics via synthetic hourly profiles)
 python fetch_nasa_power.py --start 20251201 --end 20251215 --mode daily
+python physics_model.py --source nasa_power_daily --start 20251201 --end 20251215
 ```
 
 ---
