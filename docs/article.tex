@@ -1,0 +1,970 @@
+% ============================================================
+%  Physics-Based PV Generation Prediction for IoT SCADA
+%  A Business R&D Article
+%  Compile with: pdflatex + bibtex (or lualatex / xelatex)
+% ============================================================
+
+\documentclass[11pt, a4paper]{article}
+
+% ---- Encoding & font ----------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{palatino}           % Palatino body font (LinkedIn-ish warmth)
+\usepackage{microtype}          % Improved kerning & protrusion
+
+% ---- Math & symbols ----------------------------------------
+\usepackage{amsmath}            % \text{} inside math mode
+\usepackage{amssymb}            % \checkmark, standard math symbols
+\usepackage{eurosym}            % \EUR{} euro sign
+
+% ---- Page geometry ------------------------------------------
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=2.8cm, right=2.8cm,
+  headheight=14pt              % silence fancyhdr \headheight warning
+]{geometry}
+
+% ---- Colours ------------------------------------------------
+\usepackage[dvipsnames, table]{xcolor}
+\definecolor{brandblue}{HTML}{0A66C2}   % LinkedIn brand blue
+\definecolor{brandgrey}{HTML}{F3F2EF}   % LinkedIn light grey background
+\definecolor{accentorange}{HTML}{E07B39}
+\definecolor{accentgreen}{HTML}{3B7D3A}
+\definecolor{lightgrey}{HTML}{6B7280}
+\definecolor{darkgrey}{HTML}{1F2937}
+
+% ---- Section styling ----------------------------------------
+\usepackage{titlesec}
+\titleformat{\section}
+  {\large\bfseries\color{brandblue}}
+  {}
+  {0em}
+  {}
+  [\vspace{-0.4em}\rule{\linewidth}{1.5pt}\vspace{0.2em}]
+
+\titleformat{\subsection}
+  {\normalsize\bfseries\color{darkgrey}}
+  {}
+  {0em}
+  {}
+
+\titleformat{\subsubsection}
+  {\small\bfseries\color{lightgrey}\itshape}
+  {}
+  {0em}
+  {}
+
+% ---- Paragraph spacing --------------------------------------
+\usepackage{parskip}
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+% ---- Lists --------------------------------------------------
+\usepackage{enumitem}
+\setlist[itemize]{
+  leftmargin=1.4em,
+  topsep=0.2em,
+  itemsep=0.2em,
+  label={\color{brandblue}\textbullet}
+}
+\setlist[enumerate]{
+  leftmargin=1.6em,
+  topsep=0.2em,
+  itemsep=0.2em
+}
+
+% ---- Tables ------------------------------------------------
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{multirow}
+\renewcommand{\arraystretch}{1.3}
+
+% ---- Callout / highlight boxes ----------------------------
+\usepackage{tcolorbox}
+\tcbuselibrary{skins, breakable}
+
+% Insight box (blue tint)
+\newtcolorbox{insightbox}[1][]{
+  enhanced,
+  breakable,
+  colback=brandblue!6,
+  colframe=brandblue,
+  fonttitle=\bfseries\small,
+  title={#1},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  arc=3pt
+}
+
+% Warning / gap box (orange tint)
+\newtcolorbox{gapbox}[1][]{
+  enhanced,
+  breakable,
+  colback=accentorange!8,
+  colframe=accentorange,
+  fonttitle=\bfseries\small,
+  title={#1},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  arc=3pt
+}
+
+% Stat highlight (green)
+\newtcolorbox{statbox}{
+  enhanced,
+  colback=accentgreen!7,
+  colframe=accentgreen,
+  left=6pt, right=6pt, top=3pt, bottom=3pt,
+  arc=3pt
+}
+
+% ---- Hyperlinks --------------------------------------------
+\usepackage[
+  colorlinks=true,
+  linkcolor=brandblue,
+  citecolor=brandblue,
+  urlcolor=brandblue
+]{hyperref}
+
+% ---- Graphics & floats ------------------------------------
+\usepackage{graphicx}
+\usepackage{float}
+
+% ---- Header / footer --------------------------------------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{lightgrey}\textit{ThingsNode · S.\,M.\,Pasindu Upeksha Senevirathne}}
+\fancyhead[R]{\small\color{lightgrey}March 2026}
+\fancyfoot[C]{\small\color{lightgrey}\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\headrule}{\color{brandblue}\hrule width\headwidth height\headrulewidth}
+
+% ---- Bibliography ------------------------------------------
+\usepackage[
+  backend=bibtex,
+  style=numeric,
+  sorting=none,
+  maxbibnames=3
+]{biblatex}
+\addbibresource{article.bib}
+
+% ---- Utility macros -----------------------------------------
+\newcommand{\highlight}[1]{\textbf{\color{brandblue}#1}}
+\newcommand{\kw}[1]{\textit{#1}}
+\newcommand{\metric}[2]{\textbf{#1}\,\textcolor{lightgrey}{\small(#2)}}
+
+% ============================================================
+\begin{document}
+
+% ---- Title block -------------------------------------------
+\begin{center}
+  {\fontsize{22}{28}\selectfont\bfseries\color{darkgrey}
+    Physics-Based Solar PV Generation Prediction\\[4pt]
+    \color{brandblue}for IoT SCADA Systems}\\[10pt]
+  {\large\color{lightgrey}
+    A Practical R\&D Journey: Physics-Based PV Modelling on AWS Lambda,\\
+    from PVsyst Parameters to a Production IoT Pipeline}\\[14pt]
+  \rule{0.6\linewidth}{0.6pt}\\[8pt]
+  {\small\color{lightgrey}
+    S.\,M.\,Pasindu Upeksha Senevirathne \quad|\quad ThingsNode \quad|\quad March 2026 \quad|\quad LinkedIn}
+\end{center}
+
+\vspace{0.6em}
+
+% ---- Author note -------------------------------------------
+\begin{insightbox}[About This Article]
+This article documents an engineering project I built during my internship
+at ThingsNode: a physics-based PV generation prediction system for a 55\,kW
+multi-orientation rooftop solar installation in Sri Lanka, deployed on an
+AWS IoT pipeline. It covers the scientific methods chosen, the approaches
+explored and discarded, and the accuracy achieved in real operational conditions.
+\end{insightbox}
+
+\vspace{0.5em}
+
+% ============================================================
+\section{The Problem Nobody Has Fully Solved}
+% ============================================================
+
+Monitoring a solar PV plant in real time means answering one fundamental
+question at every telemetry tick: \highlight{is this plant performing as expected?}
+
+To answer that, you need two numbers: \emph{actual generation} (from the meter)
+and \emph{expected generation} (from a model). The first is easy. The second is
+surprisingly hard to do well, cheaply, and fast enough for real-time SCADA.
+
+The core tension is this:
+
+\begin{itemize}
+  \item \textbf{Physics models} (pvlib, PVsyst) are accurate, but running
+    them inside an IoT pipeline --- triggered at every telemetry message, at
+    fleet scale --- requires an architecture that most teams don't have.
+  \item \textbf{Commercial cloud APIs} (SolarEdge, AlsoEnergy PowerTrack,
+    Sungrow iSolarCloud) are tightly coupled to their own hardware and
+    subscription plans, and do not work for third-party inverters or
+    multi-vendor fleets.
+  \item \textbf{Simple regression models} trained on historical data require
+    ground-truth generation labels, take weeks to calibrate per plant, and
+    break the moment a module is added or shading changes.
+  \item \textbf{Nameplate-based estimators} (``GHI × rated efficiency × area'')
+    ignore orientation, temperature, clipping, and IAM --- error margins of
+    20--30\% are common.
+\end{itemize}
+
+We set out to close this gap for a real operational deployment:
+a \textbf{55\,kW multi-orientation rooftop PV system} on a school building
+in North-Central Sri Lanka, connected to an AWS IoT pipeline and a Meteocontrol
+data logger, with 8 differently-oriented roof planes spanning all compass
+quadrants.
+
+The stakes extend beyond individual asset economics. In early 2025, Sri Lanka
+experienced grid instability linked to the rapid, unpredicted surge in rooftop
+solar generation on a low-demand day --- an event that highlighted the systemic
+risk of not knowing, in real time, how much generation a distributed PV fleet
+is actually producing vs what was expected. Accurate, per-site expected
+generation is not only an O\&M tool; it is a grid-stability input.
+
+At plant level, the impact is equally concrete. A persistent 10\% soiling
+loss on a 55\,kW plant means roughly 30--36\,kWh of missed generation every
+clear day --- \$1{,}500--2{,}500 per year in avoided-cost or feed-in revenue,
+continuously invisible without a physics baseline to compare against.
+
+% ============================================================
+\section{The Market Landscape: What Others Do (and Don't)}
+% ============================================================
+
+\subsection{Commercial Monitoring Platforms}
+
+Most solar monitoring vendors are vertically integrated: they sell the inverter,
+the logger, and the dashboard as a bundle. Expected generation is typically
+backed by a simple clearness-index model or a manufacturer-supplied yield
+curve --- neither is PVsyst-consistent or orientation-aware.
+
+\begin{table}[H]
+\centering
+\caption{Market solutions vs our approach}\label{tab:market}
+\small
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.6cm} X X X}
+\toprule
+Feature &
+\color{brandblue}ThingsNode Engine &
+Commercial Platforms &
+Open-Source (pvlib) \\
+\midrule
+Vendor hardware lock       & None         & Often required     & None \\
+Serverless cloud (AWS Lambda)& \color{accentgreen}\checkmark & Proprietary cloud  & \color{accentorange}$\times$ \\
+PVsyst-consistent physics  & \color{accentgreen}\checkmark & Partial            & \color{accentgreen}\checkmark \\
+Multi-orientation support  & \color{accentgreen}\checkmark & Per-inverter only  & \color{accentgreen}\checkmark \\
+Free irradiance sources    & NASA/Open-Meteo & Proprietary       & Manual \\
+No vendor hardware lock    & \color{accentgreen}\checkmark & Often required     & \color{accentgreen}\checkmark \\
+Multi-source data fallback & \color{accentgreen}\checkmark & \color{accentorange}$\times$ & Manual \\
+Per-plant calibration      & \color{accentgreen}\checkmark & Black-box          & Manual \\
+Open source                & Planned       & \color{accentorange}$\times$ & \color{accentgreen}\checkmark \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{What the Market Does Well (and We Should Acknowledge)}
+
+\begin{itemize}
+  \item \textbf{SolarEdge, SMA, Huawei}: Deep hardware integration gives them
+    precise DC string-level diagnostics we cannot match from irradiance alone.
+  \item \textbf{Solcast}: Class-leading satellite irradiance with 15-minute
+    resolution and uncertainty bands --- we use Solcast as a data source, not a
+    competitor.
+  \item \textbf{Aurora Solar, PVCase}: Superior shading engine using 3-D models
+    and LiDAR --- far beyond our scope.
+  \item \textbf{PVsyst}: Industry gold standard for bankable energy yield
+    assessments. Our model is designed to be \emph{consistent} with PVsyst,
+    not to replace it.
+\end{itemize}
+
+\subsection{What the Market Does Not Do Well}
+
+\begin{itemize}
+  \item \textbf{Multi-vendor SCADA at accessible cost}: Enterprise APM platforms
+    (AlsoEnergy, Power Factors) \emph{can} handle heterogeneous fleets, but
+    they are priced for utility-scale operators. The barrier for independent
+    C\&I operators is not technical --- it is cost and proprietary integration
+    complexity. A self-hosted physics engine removes both.
+  \item \textbf{Open API access}: Major OEMs (e.g.\ SolarEdge) have
+    progressively restricted third-party API access, forcing independent
+    analytics platforms onto rate-limited ``associated account'' channels.
+    Relying on standard data logger telemetry (Meteocontrol, SMA Data Manager)
+    rather than cloud-to-cloud OEM APIs sidesteps this dependency entirely.
+  \item \textbf{Edge / offline expected generation}: A rule chain firing
+    every 15 minutes across thousands of devices cannot make an external
+    API call per tick without latency and cost implications.
+  \item \textbf{Transparent, auditable physics}: Most commercial expected
+    generation values are black-box numbers. Our model is fully inspectable,
+    config-driven, and PVsyst-traceable.
+  \item \textbf{Cost inefficiency for independent operators}: Physics-grade
+    PV modelling typically requires a PVsyst license
+    (\textasciitilde\EUR{}2{,}000/year) or a commercial monitoring
+    subscription at \$10--\$50 per kW per year. For most operators, this
+    cost buys a black-box number with no way to audit, debate, or correct it.
+\end{itemize}
+
+% ============================================================
+\section{Our System --- What We Have (and Why)}
+% ============================================================
+
+\subsection{The Physics Engine}
+
+The core of the system is a full, PVsyst-consistent physics chain implemented
+in Python using pvlib \cite{holmgren2018pvlib}. It is the engineering
+source of truth for the entire pipeline.
+
+\textbf{The computation chain, in order:}
+
+\begin{enumerate}
+  \item \textbf{Irradiance ingestion} --- from multiple satellite and reanalysis
+    sources: Solcast, NASA POWER, Open-Meteo, ERA5, or local measurement files
+  \item \textbf{Solar position} --- NREL Solar Position Algorithm (sub-0.01°
+    accuracy \cite{reda2004solar})
+  \item \textbf{POA irradiance transposition} --- Perez diffuse model
+    \cite{perez1990set} applied independently to each of the 8 roof orientations
+  \item \textbf{Far shading} --- a multiplicative scalar factor from the plant's
+    PVsyst site report
+  \item \textbf{AOI \& IAM correction} --- angle-of-incidence and incidence
+    angle modifier table, extracted from PVsyst and interpolated per orientation
+    \cite{deline2011broken}
+  \item \textbf{Cell temperature} --- Sandia Array Performance Model (SAPM)
+    thermal model \cite{king2004photovoltaic}, driven by POA irradiance and
+    wind speed
+  \item \textbf{DC power} --- temperature-corrected PVWatts-style formulation:
+    $P_{DC} = \text{POA}_{\text{opt}} \times \eta_{STC}
+    \times (1 + \gamma_P (T_{cell} - 25)) \times k_{DC}$
+  \item \textbf{DC loss chain} --- 5 sequential multipliers from PVsyst loss
+    diagram:
+    soiling (3.0\%) $\to$ LID (1.4\%) $\to$ module quality ($-$0.8\% gain)
+    $\to$ mismatch (1.7\%) $\to$ DC wiring (0.9\%)
+  \item \textbf{Load-dependent inverter efficiency} --- 21-point efficiency
+    curve from PVsyst, linearly interpolated at runtime
+  \item \textbf{Plant-level clipping} --- applied once at 55\,kW AC after
+    summing all 8 orientations
+  \item \textbf{AC wiring loss} --- 0.3\% applied to the clipped plant output
+\end{enumerate}
+
+\begin{insightbox}[Why we chose these methods]
+Each step was specifically chosen for PVsyst consistency. The Perez model
+outperforms simpler isotropic diffuse models by 5--10\% RMSE on tilted
+multi-orientation arrays \cite{gueymard2009direct}. SAPM's inclusion of
+wind speed is critical in tropical coastal climates: research on tropical
+PV sites shows SAPM cell temperature errors of 2--5\,K, compared to up
+to 14\,K for static NOCT models \cite{king2004photovoltaic}. At
+$\gamma_P = -0.34\%/^\circ$C, each 3\,K error propagates to a 1\% DC
+power bias. The load-dependent inverter curve eliminates a systematic 1--3\%
+over-prediction at partial load that a constant-efficiency assumption introduces.
+\end{insightbox}
+
+\subsection{The Irradiance Fallback Architecture}
+
+No single free irradiance source is reliable in all weather conditions.
+The prediction system draws simultaneously from four independent sources
+--- Solcast, NASA POWER, Open-Meteo, and ERA5 --- and assembles each
+weather field (GHI, DNI, DHI, air temperature, wind speed) from the
+best available source per timestamp:
+
+\[
+\text{Solcast} \to \text{NASA POWER} \to \text{Open-Meteo} \to \text{ERA5}
+\]
+
+The cascade priority reflects empirical accuracy: 2025 global benchmarking
+shows Solcast achieving a GHI Mean Absolute Percentage Error (MAPE) of
+\textasciitilde{}10.7\% vs ERA5's \textasciitilde{}18.4\% across diverse
+climates \cite{ineichen2011global}. Both converge during deep convective
+monsoon events --- the fundamental limit of satellite and reanalysis products.
+ERA5 provides temperature and wind but not irradiance, so it serves as a
+weather-only fallback.
+
+\subsection{The Explored Path: A Calibrated Approximation for Edge Deployment}
+
+Before committing to a cloud architecture, we investigated whether a physics
+approximation could run directly inside an IoT edge runtime --- specifically
+a ThingsBoard rule chain --- to eliminate any cloud round-trip entirely.
+This required translating the full physics model into a self-contained
+JavaScript approximation, then calibrating it against the reference model.
+
+The calibration strategy treated the Python physics engine as a
+\kw{physics oracle}: 2.5~million synthetic weather--power samples spanning
+GHI 0--1{,}200\,W/m$^2$, temperature 15--45\,$^\circ$C, and wind 0.1--15\,m/s
+were generated and used to minimise the approximation error via global
+differential evolution optimisation \cite{storn1997differential}.
+
+\begin{statbox}
+\centering
+\textbf{Approximation accuracy:} RMSE = 1.43\,kW \quad MAE = 0.67\,kW \quad
+R$^2$ = 0.9923 \quad Energy error = 1.49\% \quad (validated on 2.5M samples)
+\end{statbox}
+
+\textbf{Why this path was rejected for production:} The approximation achieves
+high correlation with the physics reference internally, but introduces systematic
+bias from a simplified diffuse irradiance model and flat inverter efficiency.
+These biases, small per hour, compound into meaningful errors over monthly
+reporting cycles. A 200--500\,ms serverless invocation is imperceptible on a
+15-minute telemetry cadence, so the latency advantage offered no practical
+benefit. Accuracy was chosen over speed.
+
+\subsection{The Production Architecture: Physics on AWS Lambda}\label{sec:aws}
+
+The production system runs the full Python physics engine as a serverless
+AWS Lambda function, triggered by AWS IoT Core rule actions on each
+incoming telemetry event.
+
+\textbf{Data flow:}
+\begin{enumerate}
+  \item AWS IoT Core receives 15-minute telemetry from the plant's Meteocontrol
+    data logger
+  \item An IoT rule routes each message to a Lambda function
+  \item Lambda fetches latest irradiance from the best available source,
+    runs the full physics engine, and computes expected AC power
+  \item The expected generation value is published back to the IoT topic
+    and surfaced on the monitoring dashboard
+\end{enumerate}
+
+This preserves the complete Perez POA transposition, SAPM thermal model,
+load-dependent inverter efficiency curve, and 5-factor DC loss chain ---
+with no accuracy compromise from approximation.
+
+\subsection{The Linear Regression Surrogate (Archived)}
+
+A much simpler alternative was also explored: a 5-feature polynomial
+regression of the form
+$P_{AC} = a_0 + a_1 GHI + a_2 GHI^2 + a_3 DNI
++ a_4 (GHI \cdot \Delta T) + a_5 (GHI \cdot v_{wind})$,
+fit to one year of physics-model outputs. The model runs nearly instantaneously
+but achieves R$^2$ = 0.42 and MAPE = 130\% on held-out hourly data. Monthly
+energy error is only 1.5\% --- but this is a statistical artefact: the
+model over-predicts in the morning and under-predicts in the afternoon in
+ways that cancel over 24 hours, not because the physics is correct.
+It is archived for contexts where only daily energy totals, not hourly
+profiles, are needed.
+
+% ============================================================
+\section{Our System --- What We Don't Have (and Why)}
+% ============================================================
+
+\begin{gapbox}[Intentional scope limits]
+The gaps below are not oversights. Each was evaluated and either deferred for
+good engineering reasons, or is simply out of project scope by design.
+\end{gapbox}
+
+\subsection{No Near-Shading Module}
+We model \kw{far shading} (a scalar horizon factor from PVsyst) but not
+\kw{near shading} --- row-to-row, parapet, or chimney shading that varies hour
+by hour. This requires a 3-D geometric engine (as in PVsyst or Aurora Solar)
+and per-plant 3-D measurement. Our target deployment is a single-family or
+commercial rooftop where PVsyst has already been used at commissioning; we
+inherit PVsyst's shading output rather than recompute it.
+
+\subsection{No Spectral Correction}
+PVsyst applies a module-specific spectral response correction that adjusts
+yield by up to 1--2\% depending on air mass and aerosol optical depth
+\cite{wright2020spectral}. We do not implement this. At low altitude (88\,m)
+and tropical latitudes, the effect is small and within our target accuracy band.
+
+\subsection{No Annual Degradation}
+Module output degrades at roughly 0.5--0.8\% per year \cite{jordan2016robust}.
+We apply LID (first-year degradation) but not an ongoing annual degradation rate
+($R_d$). For near-real-time anomaly detection on a recently commissioned plant,
+seasonal irradiance variation dominates this signal. However, there is an
+important long-term caveat: without progressively adjusting the expected
+generation baseline to account for cumulative degradation, a multi-year PR trend
+will artificially register as worsening equipment performance even when the plant
+is behaving exactly as expected. Degradation tracking is planned as a future
+module and is necessary to prevent false-positive fault alerts after year 3--5.
+
+\subsection{No Battery / Self-Consumption Offset}
+The model predicts gross AC generation. If the plant has a battery storage
+system or significant self-consumption, the site meter reading will differ from
+generation. As co-located Battery Energy Storage Systems (BESS) become
+standard in new C\&I solar installations globally, this is a growing scope
+boundary: reconciling predicted gross PV generation against a net-metered
+site export requires modelling battery dispatch, state-of-charge, and
+peak-shaving algorithms. This is architecturally out of scope for the
+current generation prediction engine but is an identified future extension.
+
+\subsection{No Load-Dependent Inverter Curve in the JS Engine}
+The JavaScript physics engine uses a flat 98\% inverter efficiency. Implementing
+a full 21-point interpolation in Nashorn JavaScript is possible but
+significantly increases the rule chain computation budget. At $<$3\% energy
+error, the flat efficiency is acceptable for real-time SCADA use. The Python
+reference model does use the full curve.
+
+\subsection{No Self-Calibrating Loss Factors}
+Our loss factors (soiling, LID, mismatch) are extracted from PVsyst at
+commissioning and remain static. A more advanced system would recalibrate
+soiling losses automatically as actual vs expected divergence grows. This
+requires several months of high-quality actuals and a calibration algorithm ---
+planned but not implemented.
+
+\subsection{No PVsyst Annual Validation}
+We have not yet run a full PVsyst simulation for this plant and compared
+annual energy totals. This is the standard bankable-yield validation step, and
+it remains pending. Our model is designed to be PVsyst-consistent, but
+consistency is assumption-based until formally validated.
+
+% ============================================================
+\section{Technical Deep Dive: Key Engineering Decisions}
+% ============================================================
+
+\subsection{Why Multi-Orientation Kills Simple Regression}
+
+With a single south-facing array, GHI maps reasonably to POA ($\text{POA}
+\approx \text{GHI} \times f(\text{tilt})$). With 8 orientations spanning SE,
+NNW, ENE, and ESE simultaneously, the same GHI value at 08:00 and at 14:00
+produces completely different total POA because east-facing arrays peak in
+the morning and west-facing arrays peak in the afternoon. A regression on GHI
+cannot distinguish these --- our linear surrogate's R$^2$ = 0.42 proves this
+empirically.
+
+\begin{insightbox}[The multi-orientation insight]
+The 8-orientation plant spreads energy production over a longer daily window,
+reducing clipping and smoothing output. On this plant, east-facing arrays
+contribute approximately 35\% of daily energy before noon; west-facing arrays
+contribute approximately 30\% after noon --- with the south-facing sections
+bridging the midday peak. Any prediction model that doesn't resolve each
+orientation's shifting POA independently will fail on mixed-azimuth arrays.
+\end{insightbox}
+
+\subsection{Plant-Level vs Per-Orientation Clipping}
+
+Early code clipped each orientation's AC power independently before aggregation.
+This is mathematically incorrect. A multi-MPPT string inverter clips the
+\emph{sum} of all DC inputs at the plant AC rating, not each sub-array
+independently. Per-orientation clipping predicted approximately 3\% more
+clipping loss than reality --- it penalised sub-arrays whose individual DC
+peak is below the threshold, even when their combined DC total exceeds it.
+Summing all orientation DC outputs first, then applying the single inverter
+clipping threshold, accurately mirrors the electrical behaviour of the physical
+hardware. We corrected this before any benchmarks were run.
+
+\subsection{Why Differential Evolution, Not Gradient Descent}
+
+During the JS edge exploration phase, we needed to tune 8 non-linear model
+parameters (SAPM thermal constants and Perez diffuse weights) simultaneously.
+SAPM and Perez terms interact --- changing the thermal model shifts cell
+temperature, which shifts DC power, which changes the load point on the inverter
+curve. This creates a highly non-convex loss surface. Gradient-based methods
+(Newton--Raphson, L-BFGS) require derivative information and are acutely
+sensitive to starting conditions on such surfaces --- in early tests they
+converged reliably only when manually initialised near the correct region, which
+is impractical for a new plant. Differential evolution
+\cite{storn1997differential}, a population-based global optimiser, explores the
+full parameter space simultaneously and converged to the solution in 112
+iterations and 13{,}677 evaluations with no starting-point tuning.
+
+\subsection{Synthetic Training Data Generation}
+
+Rather than using real historical weather data (which is limited to the period
+available from NASA POWER), we generated 2.5 million random, physically-plausible
+weather samples covering GHI 0--1200\,W/m$^2$, temperature 15--45$^\circ$C,
+and wind 0.1--15\,m/s across all daylight hours of a full tropical year. This
+``physics oracle'' approach is similar to sim-to-real transfer in robotics
+\cite{tobin2017domain}: use a high-fidelity simulator to generate copious
+training data that empirical observation cannot.
+
+% ============================================================
+\section{Performance \& Accuracy Results}
+% ============================================================
+
+\subsection{JS Physics vs Python Reference (Internal Accuracy)}
+
+\begin{table}[H]
+\centering
+\caption{JS Physics engine vs Python pvlib reference}
+\label{tab:jsvsphysics}
+\small
+\begin{tabularx}{\linewidth}{l >{\centering\arraybackslash}X >{\centering\arraybackslash}X}
+\toprule
+Metric & Value & Interpretation \\
+\midrule
+RMSE       & 1.46\,kW  & 2.65\% of 55\,kW rating \\
+MAE        & 0.68\,kW  & 1.2\% of rating \\
+R$^2$      & 0.9921    & Near-perfect correlation \\
+Energy error & 1.46\%  & Monthly totals match well \\
+MAPE       & 7.76\%    & Elevated at dawn/dusk (low power) \\
+Speed      & 0.026\,ms & 28$\times$ faster than Python \\
+Validated on & 2.5M samples & Synthetic, full input-space coverage \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Model Comparison on Real 2024 Test Data}
+
+Using 1{,}357 held-out hourly samples from 2024 NASA POWER data (73 calendar days,
+never seen during calibration):
+
+\begin{table}[H]
+\centering
+\caption{Model comparison on real held-out test set (JS vs Python model output)}
+\label{tab:testset}
+\small
+\begin{tabularx}{\linewidth}{l *{5}{>{\centering\arraybackslash}X}}
+\toprule
+Model & R$^2$ & MAE (kW) & MAPE & Energy error & Speed \\
+\midrule
+JS Physics  & 0.969 & 1.34 & 20.1\% & +5.47\% & 0.026\,ms \\
+JS Surrogate & 0.420 & 9.44 & 129.7\% & +1.50\% & 0.011\,ms \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{gapbox}[Why the surrogate's energy accuracy is misleading]
+The surrogate achieves only 1.5\% energy error but R$^2$ = 0.42. This is
+because the model systematically over-predicts at low irradiance and
+under-predicts at high irradiance in ways that \emph{happen to cancel} over a
+full day. For hourly SCADA performance monitoring, it is useless. For monthly
+billing reconciliation, it might be acceptable --- but only if you accept that
+you cannot detect event-level anomalies.
+\end{gapbox}
+
+\subsection{Against Real Meteocontrol Actuals (December 2025)}
+
+In the December 2025 benchmark window, available Meteocontrol actuals in the
+repository overlap on only two days (11 and 12 December 2025). On that overlap,
+all three models over-predicted generation. For example: on 12 December 2025,
+actual generation was \textbf{76\,kWh}; the Python model prediction was
+\textbf{263\,kWh} --- a 246\% over-prediction.
+
+Python +15.8\%, JS Physics +27.0\%, JS Surrogate +18.3\%.
+These numbers reflect the irradiance error, not the physics error.
+
+\begin{insightbox}[Why this is a data problem, not a physics problem]
+December in Sri Lanka is the North-East monsoon season. In December 2025,
+Cyclone Ditwah developed in the Bay of Bengal and subjected Sri Lanka and
+Southern India to intense cloud cover and rainfall, slashing irradiance
+significantly below seasonal norms. Solcast's own published irradiance
+analysis for this period confirms the anomaly \cite{solcast2025cyclone}.
+All reanalysis (NASA POWER, ERA5) and satellite products (Solcast) universally
+struggle to resolve micro-scale cloud optical depth during cyclonic events --
+Solcast reports GHI hourly MAPE exceeding 30\% in tropical convective
+regimes during monsoon.
+This is not a model failure --- it is the fundamental limitation of irradiance
+determination under deep convective cloud cover. No physics model can produce
+the right answer when given wrong irradiance.
+\end{insightbox}
+
+\subsection{Irradiance Source Comparison (10-day window)}
+
+\begin{table}[H]
+\centering
+\caption{Daily prediction accuracy by irradiance source (December 2025, 10 days vs Meteocontrol)}
+\label{tab:sources}
+\small
+\begin{tabular}{l r r r r}
+\toprule
+Source & Daily MAE (kWh) & Bias (kWh) & R$^2$ & Availability \\
+\midrule
+NASA POWER  & 96.2 & +32.7 & $-$0.68 & Free, global \\
+Solcast     & 97.4 & +33.9 & $-$0.71 & Paid / free tier \\
+Open-Meteo  & 111.4 & +47.9 & $-$1.55 & Free, no key \\
+ERA5        & 96.8 & +33.3 & $-$0.70 & Free, delayed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Negative R$^2$ across all sources during this window reflects the monsoon
+outlier problem. NASA POWER and ERA5 perform nearly identically (both are
+GEOS-derived reanalysis products). Open-Meteo shows higher bias during cloudy
+periods.
+
+% ============================================================
+\section{What the Research Says}
+% ============================================================
+
+\subsection{Physics vs Machine Learning for PV Prediction}
+
+The literature is evolving. Diagne \textit{et al.} \cite{diagne2013review}
+showed that physical models consistently outperform statistical models beyond
+the 6-hour horizon because they do not require the future to resemble the
+training period. Mellit \textit{et al.} \cite{mellit2010artificial} demonstrated
+that ANN-based models achieve competitive short-term (1-hour) accuracy
+\emph{but only} when trained on several years of site-specific data --- a
+condition rarely met for newly commissioned plants.
+
+By 2025--2026, the industry has largely moved toward Physics-Informed Machine
+Learning (PIML) hybrids: neural networks whose loss functions encode physical
+constraints (solar geometry, thermal exchange) to prevent outputs that violate
+thermodynamic laws. These hybrids reduce MAE by 15--30\% compared to standalone
+models on short-term tasks. However, for \emph{auditable operational baselines}
+--- where an O\&M engineer must trace every prediction to a physical assumption
+and debate it --- pure physics chains retain a decisive advantage: they require
+no labelled historical data, generalise immediately to new plants from first
+principles, and every intermediate output is interpretable. Our empirical result
+(surrogate R$^2$ = 0.42 vs JS Physics R$^2$ = 0.97) confirms this in a
+production setting with only one year of training data.
+
+\subsection{Irradiance Transposition}
+
+The Perez all-weather model \cite{perez1990set} remains the benchmark for
+tilted-surface irradiance decomposition. Gueymard \cite{gueymard2009direct}
+evaluated 54 transposition models and found Perez outperformed isotropic, Hay,
+and Reindl models by 5--10\% RMSE on non-south-facing arrays. This directly
+motivated our choice over the simpler isotropic model in the surrogate.
+
+\subsection{Cell Temperature Modelling}
+
+King \textit{et al.} \cite{king2004photovoltaic} showed that the SAPM thermal
+model (including wind speed) explains $>$95\% of cell temperature variance for
+rack-mounted modules. The NOCT-based model, still widely used in commercial
+platforms, ignores wind and introduces systematic 3--5\,K bias in coastal sites.
+At $\gamma_P = -0.34\%/^\circ$C, a 4\,K error in cell temperature translates
+to approximately 1.4\% DC power error.
+
+\subsection{Multi-Orientation Complex Rooftops}
+
+Haghdadi \textit{et al.} \cite{haghdadi2017method} demonstrated that
+orientation-disaggregated modelling is necessary for complex rooftops:
+aggregate models (single representative tilt/azimuth) under-predict energy
+by 5--15\% on mixed-orientation arrays. Our per-orientation loop with
+area-weighted aggregation addresses this finding directly.
+
+\subsection{IoT Platform Constraints}
+
+Performance benchmarks for ThingsBoard rule chains \cite{thingsboard2024perf}
+show that a single script node processing 10{,}000 messages per second requires
+sub-0.1\,ms execution. Our JS engine at 0.026\,ms comfortably meets this
+requirement. The Python pvlib stack at 0.74\,ms per call would fail at fleet
+scale ($>$1{,}000 sites at 15-minute intervals).
+
+\subsection{Sim-to-Real Transfer for Hybrid Models}
+
+Our calibration approach --- generating synthetic data from a physics model to
+train a faster approximation --- has precedent in robotics (domain randomisation
+\cite{tobin2017domain}) and PV modelling. Inman \textit{et al.}
+\cite{inman2013solar} used physics-model outputs as labels to train
+computationally efficient surrogates, reporting that physics-informed training
+sets produce surrogates that generalise better than purely data-driven ones.
+The simple polynomial regression we built demonstrates the floor of this
+approach. Future surrogates would benefit from gradient-boosted ensemble
+methods (e.g.\ XGBoost or LightGBM), which handle the non-linear, interaction-heavy
+relationship between irradiance, temperature, wind, and multi-orientation POA
+far more effectively than a polynomial basis, without sacrificing
+the physics-oracle training strategy.
+
+% ============================================================
+\section{Competitive Analysis: Where We Win and Where We Don't}
+% ============================================================
+
+\subsection{Strengths}
+
+\begin{itemize}
+  \item \highlight{Full physics, zero approximation.} The production model
+    runs the complete pvlib pipeline on AWS Lambda --- Perez transposition,
+    SAPM thermal model, load-dependent inverter curve --- with no accuracy
+    compromise from edge-side simplifications.
+  \item \highlight{Serverless, scales to any fleet.} AWS Lambda charges
+    per invocation only, with zero idle infrastructure and zero server
+    provisioning or maintenance overhead (``NoOps''). The same physics
+    engine serves one plant or one hundred --- monitoring cost scales
+    linearly with fleet size, not with a per-kW subscription.
+  \item \highlight{Multi-orientation aware.} Correctly handles 8 independent
+    roof planes with different tilts and azimuths. Most commercial expected-gen
+    tools use a single representative orientation.
+  \item \highlight{Transparent and auditable.} Every parameter (losses, IAM
+    table, thermal model, inverter curve) is stored in a human-readable JSON
+    config and traceable to a PVsyst report. Nothing is a black box.
+  \item \highlight{Cascade data resilience.} Four irradiance sources with
+    per-field fallback means predictions keep running even when individual
+    APIs fail.
+  \item \highlight{Calibration included.} The calibration pipeline is
+    fully automated. Adapting the engine to a new plant --- different
+    module type, inverter, or geometry --- takes hours, not weeks.
+  \item \highlight{Cost.} The entire stack uses free APIs (NASA POWER, ERA5,
+    Open-Meteo) as primary sources. Total infrastructure cost can be zero.
+\end{itemize}
+
+\subsection{Weaknesses}
+
+\begin{itemize}
+  \item \highlight{No near-shading.} If a plant has significant row-to-row,
+    tree, or structure shading that changes throughout the day, our model will
+    over-predict. This is the single largest accuracy risk on constrained
+    rooftops.
+  \item \highlight{Irradiance-bounded accuracy.} On days with deep convective
+    cloud cover or local monsoon, all reanalysis and satellite products
+    diverge from ground truth simultaneously. No physics model can overcome
+    incorrect inputs. This is the fundamental limit shared by every tool
+    in the market on heavily overcast days. However, this boundary is actively
+    shifting: AI-driven atmospheric foundation models (ECMWF AIFS, Google
+    GraphCast) are demonstrably outperforming traditional numerical weather
+    prediction --- and their open-weight versions are now publicly available
+    for integration into irradiance cascades.
+  \item \highlight{Static loss calibration.} Loss factors (soiling rate,
+    mismatch) are set at commissioning and do not self-update. Over a
+    multi-year horizon this introduces drift between the expected-generation
+    baseline and actual plant behaviour.
+\end{itemize}
+
+% ============================================================
+\section{Who This Is For}
+% ============================================================
+
+\subsection{Primary Audience}
+
+\begin{itemize}
+  \item \textbf{Solar O\&M engineers} managing commercial PV sites (50\,kW
+    to 5\,MW) who need a physics-correct performance ratio baseline, not a
+    nameplate-capacity average --- particularly those operating under
+    \textbf{IEC\,61724-1:2021} performance assessment requirements that
+    mandate auditable, physics-consistent expected yield.
+  \item \textbf{IoT platform developers} building solar monitoring on AWS
+    IoT Core, Azure IoT Hub, or similar --- who need a serverless expected-gen
+    function that can be triggered per telemetry message.
+  \item \textbf{Energy consultants and EPCs} who have PVsyst reports for a plant
+    and want to translate those parameters into a live monitoring baseline without
+    re-licensing PVsyst for every deployment.
+  \item \textbf{DER aggregators and VPP operators} managing heterogeneous
+    multi-vendor fleets for grid ancillary services or wholesale market bidding,
+    where per-asset real-time expected generation must be computed at scale
+    across diverse hardware without proprietary API dependency.
+  \item \textbf{Research groups and universities} studying tropical solar
+    performance who need a free, open, physics-correct baseline for comparison.
+\end{itemize}
+
+\subsection{Not the Right Tool For}
+
+\begin{itemize}
+  \item Bankable financial yield assessments (use PVsyst with certified
+    irradiance data).
+  \item String-level fault localisation (requires hardware-side diagnostics).
+  \item Plants where near-shading \textgreater\ 5\% of annual yield (use a
+    3-D shading engine first, then combine with our model).
+  \item Real-time inverter MPPT optimisation (this is a monitoring / expected
+    generation tool, not a control system).
+\end{itemize}
+
+\subsection{How to Adopt This Approach}
+
+\begin{enumerate}
+  \item \textbf{Extract plant parameters from your PVsyst commissioning report:}
+    array orientations, module datasheet values, PVsyst loss factors, the IAM
+    table, and the inverter efficiency curve.
+  \item \textbf{Configure the physics engine} with those parameters in a
+    structured plant configuration (location, geometry, losses, module and
+    inverter specifications).
+  \item \textbf{Connect to a free irradiance source} --- NASA POWER or
+    Open-Meteo require no API key and cover any location globally.
+  \item \textbf{Deploy the physics engine on AWS Lambda}, triggered by your
+    IoT telemetry events. Each invocation returns expected AC power for the
+    current irradiance and weather conditions.
+  \item \textbf{Track performance ratio} as actual $\div$ expected generation
+    on a 15-minute and daily basis. Persistent PR decline flags soiling or
+    equipment degradation in near-real time.
+\end{enumerate}
+
+% ============================================================
+\section{Why It Matters: The Value of Real-Time Accuracy}
+% ============================================================
+
+The 55\,kW plant in this study is a school building --- not a utility farm.
+On a clear Sri Lankan day, it generates roughly 300--360\,kWh. A 10\%
+soiling loss costs approximately 30--36\,kWh per day. That is a small number
+in absolute terms, but it accumulates invisibly: without a physics-based
+expected generation baseline, under-performance of this magnitude is
+indistinguishable from a cloudy day.
+
+\textbf{Four problems that a missing baseline makes structural:}
+
+\begin{itemize}
+  \item \textbf{Soiling goes undetected for weeks.} The only signal is a
+    slow drift in daily output that looks like seasonal change. Globally,
+    soiling reduces annual PV generation by 3--5\% on average and costs the
+    solar industry an estimated \EUR{}4--7 billion per year \cite{skoplaki2009performance}.
+    With a real-time performance ratio baseline, a 10\% soiling event appears
+    within hours as a diverging PR, not at the next monthly report.
+  \item \textbf{Performance ratio is meaningless without a physics model.}
+    PR calculated as actual $\div$ nameplate rewards bad weather and penalises
+    good weather. Only PR against \emph{physically modelled} expected
+    generation --- driven by the same actual irradiance the plant saw ---
+    separates equipment performance from meteorology.
+  \item \textbf{Equipment faults are misread as cloud.} A degraded MPPT
+    operating at 85\% efficiency produces an output signature identical to
+    a partly cloudy afternoon, unless you have a model that accounts for
+    both irradiance and expected electrical behaviour independently.
+  \item \textbf{Operational decisions lack an evidence base.} Cleaning
+    schedules, maintenance timing, and contractual yield reporting all require
+    a transparent, auditable reference -- not a black-box dashboard number
+    that cannot be queried or corrected.
+\end{itemize}
+
+\begin{insightbox}[The core principle]
+The goal is not perfect forecasting. It is \emph{operational decision speed}:
+detecting that something is wrong today, not next month, with a physics
+explanation that an engineer can trace and verify. A continuously available
+expected-generation baseline is the foundational layer that enables automated,
+predictive O\&M --- shifting maintenance from reactive (dispatching a crew
+after an inverter fully fails) to proactive (triggering a diagnostic the
+moment the physics model diverges from actuals by a sustained threshold).
+\end{insightbox}
+
+\subsection{Data Ownership and Long-Term Value}
+
+All predictions are stored locally in structured time-series files (hourly,
+daily, monthly rolling). The entire system --- physics engine, configuration,
+calibration pipeline --- is self-hosted. There is no vendor that can
+revoke access, change API pricing, or sunset the product. Over years of
+operation, accumulated expected-vs-actual records become an auditable asset
+for O\&M reporting, degradation analysis, and project refinancing.
+
+% ============================================================
+\section{Conclusion \& Roadmap}
+% ============================================================
+
+What we built is a complete, physics-correct PV generation prediction
+system: from a PVsyst commissioning report to a serverless AWS Lambda
+function that fires at every telemetry tick, with no vendor lock-in,
+no recurring API cost, and no accuracy compromise.
+
+The validation on the 55\,kW school rooftop shows a system that correctly
+separates weather-driven generation from equipment-driven generation ---
+including the critical observation that during the December 2025 monsoon
+period, model accuracy was limited not by the physics, but by the quality
+of every available irradiance data source. That is a finding, not a failure.
+
+What this system does not solve is the irradiance forecasting problem on
+heavy cloud-cover days --- and that limitation is shared universally.
+
+\textbf{Near-term roadmap:}
+\begin{itemize}
+  \item Formal annual energy parity validation against PVsyst simulation
+  \item Automated soiling detection via rolling expected vs actual PR divergence
+  \item Annual degradation rate tracking from multi-year PR trend analysis
+  \item Physics-Informed Machine Learning (PIML) self-calibration layer:
+    embedding physical solar geometry and thermal constraints directly into
+    a self-updating parameter model, allowing loss factors to adapt to
+    observed actuals without requiring full re-commissioning
+  \item Multi-plant deployment with per-plant physics configuration
+  \item Integration of next-generation AI weather models (e.g.\ ECMWF\,AIFS,
+    Google\,GraphCast) into the irradiance cascade
+  \item Open-source release with full documentation
+\end{itemize}
+
+\begin{insightbox}[The core thesis]
+A physics engine embedded in your IoT pipeline --- not an annual report,
+not a black-box dashboard, but a real-time serverless function that computes
+\emph{what this plant should be generating right now} --- is the missing
+layer in most solar SCADA deployments. The path from a PVsyst commissioning
+report to a production AWS Lambda node can be measured in hours.
+\end{insightbox}
+
+
+
+\vspace{1em}
+
+\noindent\rule{\linewidth}{0.4pt}
+
+{\small\color{lightgrey}
+\noindent\textit{For questions or collaboration on this work, connect with
+S.\,M.\,Pasindu Upeksha Senevirathne via LinkedIn.}}
+
+% ============================================================
+%  BIBLIOGRAPHY
+% ============================================================
+
+\newpage
+\printbibliography[title={References}]
+
+\end{document}

@@ -1,0 +1,548 @@
+\documentclass[11pt,a4paper]{article}
+
+% -------------------------------------------------------------------
+% LinkedIn article draft (separate from docs/article.tex)
+% Compile: pdflatex + bibtex + pdflatex + pdflatex
+% -------------------------------------------------------------------
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{palatino}
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{
+  top=2.4cm,
+  bottom=2.4cm,
+  left=2.6cm,
+  right=2.6cm,
+  headheight=14pt
+}
+
+\usepackage[dvipsnames,table]{xcolor}
+\definecolor{brandblue}{HTML}{0A66C2}
+\definecolor{textdark}{HTML}{1F2937}
+\definecolor{textmuted}{HTML}{6B7280}
+\definecolor{okgreen}{HTML}{2E7D32}
+\definecolor{warnorange}{HTML}{D97706}
+\definecolor{softbg}{HTML}{F5F7FA}
+
+\usepackage{titlesec}
+\titleformat{\section}
+  {\large\bfseries\color{brandblue}}{}{0em}{}
+  [\vspace{-0.3em}\rule{\linewidth}{1.2pt}\vspace{0.15em}]
+\titleformat{\subsection}
+  {\normalsize\bfseries\color{textdark}}{}{0em}{}
+
+\usepackage{parskip}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.4em,itemsep=0.2em,topsep=0.2em}
+\setlist[enumerate]{leftmargin=1.6em,itemsep=0.2em,topsep=0.2em}
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\renewcommand{\arraystretch}{1.2}
+
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\newtcolorbox{insightbox}[1][]{
+  enhanced,
+  breakable,
+  colback=brandblue!5,
+  colframe=brandblue,
+  fonttitle=\bfseries\small,
+  title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt,arc=3pt
+}
+\newtcolorbox{scopebox}[1][]{
+  enhanced,
+  breakable,
+  colback=warnorange!8,
+  colframe=warnorange,
+  fonttitle=\bfseries\small,
+  title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt,arc=3pt
+}
+
+\usepackage{amsmath}
+\usepackage[
+  colorlinks=true,
+  linkcolor=brandblue,
+  citecolor=brandblue,
+  urlcolor=brandblue
+]{hyperref}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{textmuted}\textit{ThingsNode -- S.\,M.\,Pasindu Upeksha Senevirathne}}
+\fancyhead[R]{\small\color{textmuted}March 2026}
+\fancyfoot[C]{\small\color{textmuted}\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\usepackage[
+  backend=bibtex,
+  style=numeric,
+  sorting=none,
+  maxbibnames=3
+]{biblatex}
+\addbibresource{article.bib}
+
+\newcommand{\artifact}[1]{\texttt{#1}}
+\newcommand{\metric}[1]{\textbf{#1}}
+\newcommand{\todoitem}[1]{\textcolor{warnorange}{#1}}
+
+\begin{document}
+
+\begin{center}
+  {\fontsize{21}{27}\selectfont\bfseries\color{textdark}
+  From Initial Plan to Production Model:\\
+  Physics-Based PV Expected Generation for IoT SCADA}\\[8pt]
+  {\large\color{brandblue}
+  A practical engineering journey from project plan to production deployment,\\
+  based on repository code, configs, data, and output artifacts}\\[10pt]
+  {\small\color{textmuted}
+  S.\,M.\,Pasindu Upeksha Senevirathne \quad|\quad ThingsNode \quad|\quad March 2026 \quad|\quad LinkedIn}
+\end{center}
+
+\begin{insightbox}[Scope of this article]
+This document is intentionally evidence-first. It is written from repository artifacts:
+\artifact{docs/}, \artifact{scripts/}, \artifact{config/plant\_config.json},
+\artifact{data/}, and \artifact{output/}. The final reference model is
+\artifact{scripts/python\_physics/physics\_model.py}; other irradiance-to-generation paths are documented as trial-and-error work.
+This project was developed individually during my internship at ThingsNode.
+\end{insightbox}
+
+% ===================================================================
+\section{Structure and Conventions}
+% ===================================================================
+
+This article follows a practical engineering narrative with artifact-backed claims.
+
+\textbf{Document structure used in Overleaf}
+\begin{enumerate}
+  \item Problem and business need
+  \item What was built (production path)
+  \item What was intentionally out of scope
+  \item What was tested and discarded
+  \item Evidence from generated outputs
+  \item Market comparison and positioning
+  \item Research alignment and technical rationale
+  \item Product strengths, weaknesses, and fit
+  \item Adoption playbook and roadmap
+\end{enumerate}
+
+\textbf{Conventions used}
+\begin{itemize}
+  \item \textbf{Evidence-tagged claims:} metrics are tied to explicit files (for example, \artifact{output/js\_validation\_results.json}).
+  \item \textbf{Model path separation:} reference model vs helper/experimental paths are never mixed.
+  \item \textbf{Business relevance first:} each technical choice is explained with product impact (accuracy, speed, cost, operability).
+  \item \textbf{Caveat-first reporting:} when a metric has window or pipeline bias, that caveat is stated beside the metric.
+  \item \textbf{Currency convention:} when monetary values are referenced, USD is used for international readability.
+  \item \textbf{Client anonymization:} plant owner name is intentionally omitted in this public version.
+\end{itemize}
+
+% ===================================================================
+\section{Problem and Why It Matters}
+% ===================================================================
+
+Solar operations teams need expected generation at telemetry cadence, not only annual planning reports.
+Without that baseline, the following are hard to detect in time: soiling drift, inverter underperformance,
+and weather-normalized PR deterioration.
+
+The project started from \artifact{docs/project\_plan.md}, then evolved through multiple implementation paths.
+The key product question became:
+
+\begin{quote}
+\textit{Can we produce an expected-generation engine that is physics-consistent, auditable, and operationally deployable in an IoT pipeline?}
+\end{quote}
+
+\textbf{Project deployment context and data context}
+\begin{itemize}
+  \item Primary dataset context: Dewanappiyatissa School PV site, Sri Lanka
+  \item Site coordinates: latitude 8.342368984714714, longitude 80.37623529556957
+  \item Repository configuration context: 55\,kW AC rooftop system (\artifact{config/plant\_config.json})
+  \item Geometry in config: 8 orientations, 216 modules, 552.096\,m$^2$ total module area
+\end{itemize}
+
+% ===================================================================
+\section{What We Built (Production Reference Path)}
+% ===================================================================
+
+\subsection{Reference Model: \artifact{physics\_model.py}}
+
+The retained model is \artifact{scripts/python\_physics/physics\_model.py}, built with pvlib \cite{holmgren2018pvlib}.
+It supports hourly and daily irradiance inputs (daily can run through synthetic-hourly reconstruction, or a simpler daily branch).
+
+\textbf{Core chain in execution order}
+\begin{enumerate}
+  \item Source ingestion: Solcast API, NASA POWER hourly/daily, CSV hourly/daily
+  \item Solar position via pvlib location/SPA \cite{reda2004solar}
+  \item POA transposition with Perez model \cite{perez1990set}
+  \item Far-shading multiplier
+  \item AOI + IAM interpolation table
+  \item SAPM cell temperature model \cite{king2004photovoltaic}
+  \item DC conversion with temperature correction
+  \item Sequential DC loss chain from configured loss terms
+  \item DC-to-AC conversion (curve-based or flat, controlled by config)
+  \item Plant-level clipping, then AC wiring loss
+\end{enumerate}
+
+\textbf{Reference formulation}
+\[
+P_{AC}(t)=
+\left(
+\min\left[
+\sum_i P_{DC,i}(t)\cdot \eta_{inv}(P_{DC,i}(t)),\;
+P_{AC,\max}
+\right]
+\right)\cdot(1-L_{AC})
+\]
+where each orientation $i$ uses Perez POA, IAM, SAPM thermal correction, and configured DC losses.
+
+\subsection{Operational Orchestration: \artifact{daily\_predictor.py}}
+
+\artifact{scripts/python\_physics/daily\_predictor.py} runs daily and merges weather fields through source fallback chains.
+It writes append-mode hourly/daily/monthly outputs under:
+\artifact{output/hourly/}, \artifact{output/daily/}, \artifact{output/monthly/}.
+
+\begin{insightbox}[Important implementation nuance]
+\artifact{daily\_predictor.py} uses a simplified inline physics variant (flat inverter efficiency for speed).
+The reference math remains \artifact{physics\_model.py}. This separation is explicit in current docs
+(\artifact{docs/model\_methods.md}, \artifact{docs/article\_evidence\_pack.md}).
+\end{insightbox}
+
+\subsection{Chosen Production Deployment: AWS IoT Core + Lambda}
+
+The final production choice is the Python reference model on AWS, not a JavaScript edge runtime:
+\begin{enumerate}
+  \item telemetry enters AWS IoT Core,
+  \item IoT rule triggers AWS Lambda,
+  \item Lambda executes \artifact{scripts/python\_physics/physics\_model.py},
+  \item expected generation is published back to IoT topics and dashboards.
+\end{enumerate}
+
+This decision prioritized accuracy over speed. JavaScript paths were explored and benchmarked,
+but were not selected as the production baseline.
+
+\subsection{Configuration and Auditability}
+
+The design is config-driven, not hardcoded:
+\begin{itemize}
+  \item geometry and orientation count,
+  \item module and inverter parameters,
+  \item loss factors and IAM table,
+  \item timezone and defaults for weather fallbacks.
+\end{itemize}
+
+This enables reproducibility per plant without changing core code.
+
+% ===================================================================
+\section{What We Intentionally Did Not Build (Yet)}
+% ===================================================================
+
+\begin{scopebox}[Deliberate scope boundaries]
+These are known boundaries, not accidental omissions. Each was assessed against
+delivery timeline, required data, and operational payoff.
+\end{scopebox}
+
+\begin{itemize}
+  \item \textbf{No near-shading geometry engine}: no row-to-row or 3D obstruction simulation in this codebase.
+  \item \textbf{No spectral correction module}: no explicit spectral mismatch correction layer.
+  \item \textbf{No annual degradation tracking}: LID exists, long-term degradation trend module is not implemented.
+  \item \textbf{No battery/self-consumption dispatch model}: expected gross generation is modeled, not full site energy economics.
+  \item \textbf{No automatic self-calibration of losses}: losses are static from config/PVsyst extraction process.
+  \item \textbf{No completed annual PVsyst parity study}: still pending as a formal bankability-grade validation.
+\end{itemize}
+
+These limits are documented in \artifact{docs/model\_methods.md} and \artifact{docs/article\_research.md}.
+
+% ===================================================================
+\section{Trial-and-Error Work and Why It Was Discarded}
+% ===================================================================
+
+\subsection{Simplified Daily Model Branch}
+\begin{itemize}
+  \item File path: \artifact{calculate\_daily\_energy\_simple()} in \artifact{physics\_model.py}
+  \item Benefit: very fast daily estimate
+  \item Rejection reason: weak hourly fidelity, hardcoded POA factor behavior, reduced physical realism
+\end{itemize}
+
+\subsection{Synthetic Hourly Reconstruction from Daily Totals}
+\begin{itemize}
+  \item File path: \artifact{generate\_synthetic\_hourly\_from\_daily()}
+  \item Benefit: allows full hourly chain when only daily totals are available
+  \item Limitation: clear-sky-shaped intraday profile can diverge heavily on convective cloud days
+\end{itemize}
+
+\subsection{JS Surrogate Regression}
+\begin{itemize}
+  \item Files: \artifact{scripts/js\_surrogate/fit\_surrogate.py}, \artifact{surrogate\_model.js}
+  \item Equation: $a_0 + a_1GHI + a_2GHI^2 + a_3DNI + a_4(GHI\Delta T)+a_5(GHIv)$
+  \item Outcome: very fast, but poor hourly behavioral fidelity
+  \item Evidence: on held-out test (\artifact{output/test\_evaluation\_metrics.json}), \metric{$R^2=0.420$}, MAE 9.44\,kW, MAPE 129.7\%
+\end{itemize}
+
+\subsection{Standalone DNI Decomposition Script}
+\begin{itemize}
+  \item File: \artifact{scripts/predict\_dni.py}
+  \item Value: diagnostic consistency check
+  \item Status: not required for final expected-generation pipeline, archived as utility
+\end{itemize}
+
+% ===================================================================
+\section{Evidence from Output Artifacts}
+% ===================================================================
+
+\subsection{Internal Parity: JS Physics Approximation vs Python Labels (Exploratory)}
+
+These internal parity metrics come from the repository's 55\,kW configuration artifacts.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Calibration and validation of JS physics approximation}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{4.2cm} X}
+\toprule
+Metric source & Result \\
+\midrule
+\artifact{output/js\_physics\_calibration.json} &
+Baseline RMSE 2.2449\,kW \textrightarrow{} Final RMSE 1.4340\,kW; MAE 0.6723\,kW; $R^2=0.99233$; energy error 1.491\%; 112 iterations, 13,677 evaluations \\
+\artifact{output/js\_validation\_results.json} &
+2,500,000 samples; RMSE 1.4577\,kW (2.65\% of 55\,kW), MAE 0.6763\,kW, $R^2=0.99214$, MAPE 7.76\%, energy error 1.456\% \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Held-Out 2024 Test Set (JS Models vs Python-Labeled Test Data)}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Held-out test metrics from \artifact{output/test\_evaluation\_metrics.json}}
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.0cm} >{\raggedleft\arraybackslash}p{1.5cm} >{\raggedleft\arraybackslash}p{1.8cm} >{\raggedleft\arraybackslash}p{1.8cm} >{\raggedleft\arraybackslash}p{2.0cm}}
+\toprule
+Model & $R^2$ & MAE (kW) & MAPE & Energy error \\
+\midrule
+JS Physics & 0.9685 & 1.3387 & 20.09\% & +5.47\% \\
+JS Surrogate & 0.4200 & 9.4375 & 129.70\% & +1.50\% \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Provenance caveat:} these metrics are produced by \artifact{scripts/shared/evaluate\_models.py},
+which uses an inline JS-physics evaluator path for test execution.
+
+\subsection{Against Real Meteocontrol Daily Actuals (December 2025)}
+
+From \artifact{output/benchmark\_results.csv}, only two days contain overlapping non-null actuals:
+\begin{itemize}
+  \item 11 Dec 2025: Actual 345.36\,kWh vs Python 224.53\,kWh
+  \item 12 Dec 2025: Actual 75.982\,kWh vs Python 263.41\,kWh
+\end{itemize}
+
+Overlap-only totals (2 days):
+\begin{itemize}
+  \item Python: +15.81\%
+  \item JS Physics: +27.03\%
+  \item JS Surrogate: +18.29\%
+\end{itemize}
+
+\textbf{Critical reporting caveat:}
+\artifact{output/benchmark\_metrics.json} reports 5-day totals with inflated total-error percentages because
+predictions exist for days lacking non-null actuals in the merged comparison window.
+
+\subsection{Irradiance Source Comparison on 10-day Matched Window}
+
+From \artifact{output/accuracy\_report.txt}:
+\begin{itemize}
+  \item NASA POWER: MAE 96.2\,kWh/day, bias +32.7\,kWh/day, $R^2=-0.68$
+  \item Solcast: MAE 97.4\,kWh/day, bias +33.9\,kWh/day, $R^2=-0.71$
+  \item Open-Meteo: MAE 111.4\,kWh/day, bias +47.9\,kWh/day, $R^2=-1.55$
+  \item ERA5: MAE 96.8\,kWh/day, bias +33.3\,kWh/day, $R^2=-0.70$
+\end{itemize}
+
+This window demonstrates input-data limitation during monsoon-like cloud conditions:
+all sources bias high, so all models over-predict.
+
+% ===================================================================
+\section{What Market Solutions Have and Do Not Have}
+% ===================================================================
+
+\subsection{Where the market is strong}
+\begin{itemize}
+  \item \textbf{Inverter-vendor portals (SolarEdge/SMA/Huawei class):}
+  strong hardware-native diagnostics and device-level alarms.
+  \item \textbf{PVsyst:} bankable yield planning standard, mature loss accounting workflow.
+  \item \textbf{Irradiance specialists (for example Solcast):}
+  high-quality weather and irradiance products as input layers.
+\end{itemize}
+
+\subsection{Where gaps remain for mixed-vendor IoT SCADA fleets}
+\begin{itemize}
+  \item Vendor lock-in across data logger, inverter, and analytics stacks
+  \item Limited transparency of ``expected generation'' internals in black-box dashboards
+  \item Limited transparent expected-generation tooling that is portable across mixed-vendor fleets
+  \item Cost friction for small and mid-size operators that need auditable expected-generation baselines
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Capability comparison (product view)}
+\begin{tabularx}{\linewidth}{>{\bfseries\raggedright\arraybackslash}p{3.5cm} >{\raggedright\arraybackslash}p{3.2cm} >{\raggedright\arraybackslash}p{3.2cm} >{\raggedright\arraybackslash}X}
+\toprule
+Capability & Our reference path & Typical vendor portal & Open-source toolkit only \\
+\midrule
+Transparent model internals & Full (script + config) & Usually limited & Full \\
+Mixed-vendor portability & High & Low-to-medium & High \\
+Real-time serverless fit (AWS IoT Core + Lambda) & High & Vendor specific & Medium (integration effort) \\
+Bankability workflow & Partial / pending annual parity & Medium & Depends on implementation \\
+Cost control and self-hosting & High & Medium-to-low & High \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ===================================================================
+\section{How This Aligns with Existing Research and Tools}
+% ===================================================================
+
+This implementation direction is consistent with known literature and tools:
+\begin{itemize}
+  \item pvlib as a practical open modeling foundation \cite{holmgren2018pvlib}
+  \item Perez transposition preference for non-trivial orientation geometry \cite{perez1990set,gueymard2009direct}
+  \item SAPM thermal modeling benefits for irradiance+wind-driven cell temperature \cite{king2004photovoltaic}
+  \item Limits of pure data-driven short-horizon models without strong site-specific history \cite{diagne2013review,mellit2010artificial}
+  \item Transfer from physics ``oracle'' to faster approximation using large synthetic datasets \cite{inman2013solar,tobin2017domain}
+\end{itemize}
+
+Optimization choice (differential evolution) also matches the non-convex, interacting parameter landscape used in calibration \cite{storn1997differential}.
+
+% ===================================================================
+\section{Strengths, Weaknesses, and Product Position}
+% ===================================================================
+
+\subsection{Strengths}
+\begin{itemize}
+  \item Physics-first, auditable expected-generation engine
+  \item Strong geometry handling for multi-orientation rooftops
+  \item Config-driven reproducibility and operational script ecosystem
+  \item Demonstrated fast approximation path when edge constraints demand it
+  \item Clear artifact trail for QA and documentation
+\end{itemize}
+
+\subsection{Weaknesses and risks}
+\begin{itemize}
+  \item No near-shading simulation layer
+  \item No completed annual PVsyst parity report in-repo
+  \item Benchmark windows against actuals are currently short and weather-sensitive
+  \item Helper-script model variants can confuse reporting if provenance is not explicit
+\end{itemize}
+
+\subsection{Why this can be better than a generic product}
+\begin{itemize}
+  \item Full inspectability of assumptions and losses
+  \item No forced hardware ecosystem coupling
+  \item Ability to tune to each plant from first principles and explicit config
+\end{itemize}
+
+\subsection{Where this can be worse than a generic product}
+\begin{itemize}
+  \item Requires engineering ownership; no one-click ``managed analytics''
+  \item Lacks vendor-native deep hardware diagnostics
+  \item Accuracy remains bounded by weather-input fidelity during severe local cloud events
+\end{itemize}
+
+% ===================================================================
+\section{Who This Is For and How to Use It}
+% ===================================================================
+
+\textbf{Best-fit users}
+\begin{itemize}
+  \item Solar O\&M teams needing transparent expected-generation baselines
+  \item IoT/SCADA engineering teams integrating expected generation into telemetry pipelines
+  \item EPC and analytics teams that already extract parameters from PVsyst-style commissioning outputs
+\end{itemize}
+
+\textbf{Not the right fit}
+\begin{itemize}
+  \item Pure financial bankability workflows needing certified end-to-end vendor tooling
+  \item Teams requiring string-level hardware diagnostics from inverter-native data channels
+\end{itemize}
+
+\textbf{Adoption playbook}
+\begin{enumerate}
+  \item Populate \artifact{config/plant\_config.json} for a target site.
+  \item Run reference physics from \artifact{scripts/python\_physics/physics\_model.py}.
+  \item Generate operational predictions via \artifact{daily\_predictor.py}.
+  \item Compare with actuals using \artifact{scripts/shared/compare\_accuracy.py}.
+  \item Deploy the Python reference path in AWS Lambda with AWS IoT Core rule triggering.
+\end{enumerate}
+
+% ===================================================================
+\section{Business Need and ROI Logic}
+% ===================================================================
+
+The product value is less about ``perfect forecasting'' and more about \textit{operational decision speed}.
+When expected generation is transparent and continuously available:
+\begin{itemize}
+  \item underperformance can be detected earlier,
+  \item cleaning and maintenance timing becomes evidence-based,
+  \item PR discussions become weather-normalized instead of nameplate-normalized,
+  \item performance conversations become auditable.
+\end{itemize}
+
+For a 55\,kW site, even small persistent bias (for example 3--5\% unmanaged loss) can accumulate into meaningful monthly energy and revenue leakage.
+
+In this project, one consistent operational observation was that model behavior improves substantially when irradiance input quality is good; many sites perform as expected when the weather inputs are accurate and well-aligned to local conditions.
+
+% ===================================================================
+\section{Roadmap}
+% ===================================================================
+
+\begin{itemize}
+  \item Complete annual PVsyst parity validation for the deployed plant(s)
+  \item Add automated overlap-aware benchmarking logic (avoid inflated total-error windows)
+  \item Add near-shading and long-term degradation modules
+  \item Implement self-calibration strategy for slowly drifting loss factors
+  \item Publish a hardened deployment profile separating reference and helper model paths
+\end{itemize}
+
+% ===================================================================
+\section{Conclusion}
+% ===================================================================
+
+This project now has a clear technical and product narrative:
+\begin{itemize}
+  \item one retained reference model (\artifact{physics\_model.py}),
+  \item multiple documented trial paths with explicit rejection reasons,
+  \item measurable internal validation artifacts,
+  \item and an honest boundary on real-world accuracy when irradiance inputs are wrong.
+\end{itemize}
+
+That combination -- physics rigor, operational pragmatism, and artifact-level transparency -- is the core business differentiator.
+
+\vspace{0.6em}
+\noindent\rule{\linewidth}{0.4pt}
+{\small\color{textmuted}
+Primary evidence files used in this article include:
+\artifact{docs/project\_plan.md},
+\artifact{docs/model\_methods.md},
+\artifact{docs/article\_evidence\_pack.md},
+\artifact{docs/article\_research.md},
+\artifact{scripts/python\_physics/physics\_model.py},
+\artifact{scripts/shared/evaluate\_models.py},
+\artifact{output/js\_physics\_calibration.json},
+\artifact{output/js\_validation\_results.json},
+\artifact{output/test\_evaluation\_metrics.json},
+\artifact{output/benchmark\_metrics.json},
+\artifact{output/benchmark\_results.csv},
+\artifact{output/accuracy\_report.txt}.}
+
+\newpage
+\printbibliography[title={References}]
+
+\end{document}
