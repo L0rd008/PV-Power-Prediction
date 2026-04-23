@@ -25,6 +25,7 @@ config/plant_config.json
 *.nc
 *.tmp
 era5_temp.nc
+*.log
 
 # Output files (generated, don't commit)
 output/*.csv
@@ -41,3 +42,17 @@ output/monthly/*.csv
 # OS files
 .DS_Store
 Thumbs.db
+
+# Imported/legacy service artifacts
+Green-Power-Services-main/venv/
+Green-Power-Services-main/**/__pycache__/
+Green-Power-Services-main/**/logs/
+Green-Power-Services-main/**/Config/*.json
+Green-Power-Services-main/**/tempCodeRunnerFile.py
+Green-Power-Services-main/Simple Forcast/daily_energy_GGU_A_0994(cid
+Green-Power-Services-main/Simple Forcast/hourly_power_GGU_A_0994(cid
+Green-Power-Services-main/Solcast Forcast/interval_power_GGU_A_0994(cid
+scripts/Pvlib-Service/**/__pycache__/
+
+# Large local datasets not suitable for normal git objects
+data/js_calibration_data.csv
