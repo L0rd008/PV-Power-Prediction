@@ -10,11 +10,13 @@ This project predicts AC power output from solar PV installations using three di
 
 | Model | File | Use Case | Accuracy | Speed |
 |-------|------|----------|----------|-------|
-| **Python Physics** | `scripts/python_physics/physics_model.py` | Engineering validation, ground truth | Highest (reference) | ~0.5ms/prediction |
-| **JS Physics** | `scripts/js_physics/physics_model.js` | ThingsBoard real-time SCADA | ±3-5% vs Python | ~0.02ms/prediction |
-| **JS Surrogate** | `scripts/js_surrogate/surrogate_model.js` | High-frequency monitoring | Training-dependent | ~0.005ms/prediction |
+| **Python Physics** | scripts/python_physics/physics_model.py | Engineering validation, reference pipeline | Baseline (source of truth) | ~0.74 ms/prediction |
+| **JS Physics (calibrated)** | scripts/js_physics/physics_model.js | ThingsBoard real-time SCADA | RMSE 1.46 kW, R2 0.992 vs Python labels (output/js_validation_results.json) | ~0.026 ms/prediction |
+| **JS Surrogate** | scripts/js_surrogate/surrogate_model.js | Ultra-fast approximation | R2 0.42 hourly, +1.50% energy error on test set (output/test_evaluation_metrics.json) | ~0.011 ms/prediction |
 
-The **Python Physics model** is the source of truth, implementing full PVsyst-consistent calculations using pvlib. The **JavaScript models** are optimized approximations designed for deployment in ThingsBoard rule chains.
+The **Python Physics model** is the source of truth, implementing PVsyst-consistent calculations using pvlib. The **JavaScript models** are deployment-oriented approximations for ThingsBoard rule chains.
+
+Important: helper workflows (prepare_training_data.py, run_benchmark.py, daily_predictor.py) use inline simplified physics variants with flat inverter efficiency for speed. See docs/model_methods.md for exact metric provenance.
 
 ---
 
@@ -305,6 +307,14 @@ python run_benchmark.py --data-source nasa_power --start 20251210 --end 20251215
 | `plant_config.json` | Plant parameters (location, modules, inverter, losses) | **Edit first** for any new plant |
 | `plant_config_example.json` | Example configuration with comments | Reference when setting up |
 
+### Documentation (`docs/`)
+
+| File | Purpose |
+|------|---------|
+| `docs/model_methods.md` | **All modeling methods, design decisions, and accuracy results** — how the code evolved from the initial plan, what methods were tried at each pipeline stage, calibration and benchmark data |
+| `docs/project_plan.md` | Original methodology specification (initial plan) |
+| `docs/config_notes.md` | Early plant-specific parameter experiments (historical) |
+
 ### Data Fetchers (`scripts/python_physics/`)
 
 | File | Purpose | Dependencies | API Key |
@@ -509,13 +519,16 @@ node --version
 
 ## Typical Model Performance
 
-| Model | Test R² | Test MAE | Notes |
-|-------|---------|----------|-------|
-| Python Physics | Baseline | Baseline | Ground truth |
-| JS Physics | ~0.90+ | ~2-3 kW | After calibration |
-| JS Surrogate | ~0.25-0.40 | ~6-10 kW | Limited by training data |
+| Scenario | R2 | MAE / RMSE | Energy Error | Source |
+|----------|----|------------|--------------|--------|
+| JS Physics vs Python (calibration validation, 2.5M synthetic samples) | 0.9921 | MAE 0.676 kW, RMSE 1.458 kW | 1.456% | output/js_validation_results.json |
+| JS Physics vs Python (held-out 2024 test set, 1,357 samples) | 0.9685 | MAE 1.34 kW, RMSE 3.28 kW | +5.47% | output/test_evaluation_metrics.json |
+| JS Surrogate vs Python (held-out 2024 test set, 1,357 samples) | 0.4200 | MAE 9.44 kW, RMSE 14.09 kW | +1.50% | output/test_evaluation_metrics.json |
 
-The surrogate model typically shows lower test performance than training performance. High training R² (0.95+) with low test R² indicates overfitting - this is expected and correct behavior.
+Notes:
+- test_evaluation_metrics.json comes from evaluate_models.py, which runs an inline JS physics evaluator path.
+- js_validation_results.json comes from validate_calibration.py and is the best parity check for the calibrated scripts/js_physics/physics_model.js logic.
+- For model-path details and benchmark caveats, see docs/model_methods.md.
 
 ---
 
@@ -537,3 +550,4 @@ Update the `CALIBRATION` or `REGRESSION_COEFFICIENTS` objects with values from:
 - NASA POWER data is free but has ~7-day lag
 - Surrogate model requires training before use
 - Far-shading is controlled via `plant_config.json` (`far_shading < 1.0` enables it)
+
