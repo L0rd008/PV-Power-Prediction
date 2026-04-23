@@ -1,0 +1,133 @@
+{
+  "plant_name": "Kebithigollewa 10MWac Fixed Tilt",
+  "_pvsyst_report": "Kebithigollewa 10MWac Fixed Tilt - Huawei 300KTL Astronergy 580W N, PVsyst V7.4.2, Sim date 11/11/23",
+
+  "location": {
+    "lat": 8.56,
+    "lon": 80.66,
+    "altitude_m": 123,
+    "timezone": "Asia/Colombo"
+  },
+
+  "orientations": [
+    {
+      "name": "Main",
+      "tilt": 8,
+      "azimuth": 0,
+      "module_count": 23296,
+      "use_measured_poa": true,
+      "_note": "Single fixed-tilt plane. PVsyst: 8° tilt, 0° azimuth (South). 832 strings × 28 modules in series. use_measured_poa=true → wstn1_tilted_irradiance used directly; Perez transposition skipped when station data is available."
+    }
+  ],
+
+  "module": {
+    "area_m2": 2.5833,
+    "efficiency_stc": 0.2248,
+    "gamma_p": -0.0029,
+    "_area_derivation": "Astronergy datasheet: 2278 mm × 1134 mm = 2.5833 m²/module (cross-check: 60179 m² PVsyst total / 23296 = 2.583 m²)",
+    "_efficiency_source": "PVsyst loss diagram: 'efficiency at STC = 22.48%'. Datasheet: 22.5% for 580W. PVsyst value used.",
+    "_gamma_p_source": "Astronergy CHSM72N(DG)/F-HC-580 datasheet (confirmed): Temperature coefficient Pmpp = -0.29%/°C = -0.0029/°C. Previous estimate was -0.0030.",
+    "_model": "Astronergy CHSM72N(DG)/F-HC-580, TOPCon half-cut, 144 cells (6×24), 2278×1134×30 mm"
+  },
+
+  "inverter": {
+    "ac_rating_kw": 10000.0,
+    "dc_threshold_kw": 0.0,
+    "use_efficiency_curve": true,
+    "efficiency_curve_kw": [
+      506, 610, 701, 804, 934, 1090, 1232, 1388, 1557, 1712,
+      1881, 2102, 2322, 2504, 2698, 2958, 3191, 3477, 3762, 4086,
+      4450, 4800, 5228, 5643, 6097, 6409, 6746, 7070, 7330, 7836,
+      8368, 8796, 9133, 9548, 9898, 10249, 10573
+    ],
+    "efficiency_curve_eta": [
+      0.97900, 0.98048, 0.98197, 0.98346, 0.98494, 0.98606, 0.98699, 0.98755,
+      0.98829, 0.98866, 0.98922, 0.98978, 0.99015, 0.99015, 0.99015, 0.98996,
+      0.98996, 0.98996, 0.98996, 0.98996, 0.98996, 0.98978, 0.98978, 0.98959,
+      0.98959, 0.98941, 0.98922, 0.98922, 0.98903, 0.98885, 0.98885, 0.98885,
+      0.98866, 0.98866, 0.98866, 0.98866, 0.98866
+    ],
+    "flat_efficiency": 0.9855,
+    "_curve_source": "Digitised from SUN2000-330KTL-H1 datasheet efficiency curve at 1189 V. x-axis = % of max AC output per inverter (330 kW); converted to plant-level kW = x/100 × (32 inverters × 330 kW) = x/100 × 10560 kW. Peak η = 0.99015 at ~2322 kW plant load (22% load). η = 0.98866 at full load. 37 sample points.",
+    "_ac_rating_note": "Grid power limit from PVsyst = 10000 kWac (binding constraint). Inverter nominal = 9600 kWac (32 × 300 kW), max = 10560 kWac (32 × 330 kW).",
+    "_dc_threshold_note": "PVsyst loss diagram: 'Inverter Loss due to power threshold: 0.00%' → threshold = 0",
+    "_flat_efficiency_note": "Fallback if use_efficiency_curve=false. Derived: 1 − 1.45% inverter loss = 0.9855.",
+    "_model": "Huawei SUN2000-330KTL-H1, 32 units. 300 kWac nominal, 330 kWac max, ≥99.0% max efficiency, ≥98.8% European efficiency."
+  },
+
+  "losses": {
+    "soiling":        0.03,
+    "lid":            0.0,
+    "module_quality": -0.008,
+    "mismatch":       0.0215,
+    "dc_wiring":      0.015,
+    "ac_wiring":      0.0,
+    "albedo":         0.20,
+    "far_shading":    1.0,
+    "_soiling_note":        "3% applied for Sri Lanka ground-mounted plant. PVsyst simulation did not include soiling — this correction represents real-world conditions. Typical range for Sri Lanka: 2–5%.",
+    "_lid_note":            "TOPCon technology — LID is negligible. Not in PVsyst simulation.",
+    "_module_quality_note": "PVsyst parameter: -0.8% (gain, 0~+3% power sorting). Annual weighted: +0.75% gain in loss diagram. PVsyst sign: negative = gain.",
+    "_mismatch_note":       "PVsyst: module mismatch 2.0% at MPP + string mismatch 0.2% = 2.15% combined (loss diagram).",
+    "_dc_wiring_note":      "PVsyst: 1.5% at STC (global array resistance 1.4 mΩ). Annual weighted = 1.03% (loss diagram). STC value used uniformly; expect ~0.5% systematic overestimate.",
+    "_ac_wiring_note":      "Not in PVsyst loss diagram — no AC ohmic loss in this simulation.",
+    "_far_shading_note":    "PVsyst: 'Free Horizon — No Shadings'"
+  },
+
+  "iam": {
+    "angles": [0, 40, 50, 60, 70, 75, 80, 85, 90],
+    "values":  [1.000, 1.000, 1.000, 1.000, 1.000, 0.984, 0.949, 0.830, 0.000],
+    "_source": "PVsyst report Page 3 — IAM loss factor: User defined profile"
+  },
+
+  "thermal_model": "open_rack_glass_glass",
+  "_thermal_model_note": "PVsyst: Uc=20.0 W/m²K, Uv=0.0 W/m²K/m/s (no wind correction). 'open_rack_glass_glass' (SAPM a=-3.47, b=-0.0594, ΔT=3) is the closest pvlib match. Uv=0 means wind provides no cooling — pvlib will slightly underestimate cell temperature at high wind speeds.",
+
+  "station": {
+    "ghi_key":        "wstn1_horiz_irradiance",
+    "poa_key":        "wstn1_tilted_irradiance",
+    "air_temp_key":   "wstn1_temperature_ambient",
+    "wind_speed_key": "wstn1_wind_speed",
+    "freshness_minutes":   10,
+    "sanity_max_ghi_wm2":  1400,
+    "sanity_max_poa_wm2":  1500,
+    "_units":      "Irradiance: W/m², temperatures: °C, wind speed: m/s",
+    "_extra_keys": "wstn1_temperature_panel1/2/3 (°C panel temps), wstn1_humidity (%), wstn1_wind_dir — available but not used in model",
+    "_device":     "KSP_WSTN1, device ID: da2617d0-1ea6-11f1-a954-a570b75cadc0"
+  },
+
+  "defaults": {
+    "wind_speed_ms": 1.0,
+    "air_temp_c": 27.96,
+    "_air_temp_note": "PVsyst annual average T_Amb = 27.96°C (from monthly results table)"
+  },
+
+  "solcast_resource_id": null,
+
+  "_validation_targets": {
+    "annual_ghi_kwh_m2":  1849.9,
+    "annual_poa_kwh_m2":  1862.6,
+    "annual_e_grid_kwh":  21881645,
+    "annual_pr":          0.8695,
+    "annual_specific_prod_kwh_kwp": 1619,
+    "_source": "PVsyst P50 values — soiling NOT included in PVsyst simulation. With 3% soiling applied in this model, expect ~2–3% lower annual output vs this target."
+  },
+
+  "_tb_host": "https://windforce.thingsnode.cc",
+
+  "_tb_asset_id":               "0e4b4070-50ff-11ef-b4ce-d5aee9e495ad",
+  "_tb_asset_note":             "KSP_Plant asset — use entityType=ASSET for telemetry queries",
+  "_tb_plant_active_power_key": "EnergyMeter_active_power",
+  "_tb_plant_active_power_unit":"kW",
+
+  "_tb_device_id":           "de9f8910-4bf6-11ef-a776-63b840ab5726",
+  "_tb_device_note":         "KSP_P341 device — use entityType=DEVICE for telemetry queries",
+  "_tb_device_access_token": null,
+  "_tb_active_power_key":    "p341_active_power",
+  "_tb_active_power_unit":   "W",
+  "_tb_active_power_scale":  0.001,
+  "_tb_extra_device_keys":   "p341_current_a/b/c (mA, >100k raw → ÷1000 = A), p341_Vab/Vbc/Vca (mV, >33M raw → ÷1000 = V, 33 kV grid connection)",
+
+  "_tb_wstn_device_id":    "da2617d0-1ea6-11f1-a954-a570b75cadc0",
+  "_tb_wstn_access_token": null,
+  "_tb_wstn_note":         "KSP_WSTN1 weather station device. All telemetry keys prefixed wstn1_."
+}

@@ -1,0 +1,34 @@
+# ============================================================
+# Pvlib-Service — Python dependencies
+# Pin minor versions; let patch versions float for security fixes.
+# ============================================================
+
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.7.0
+
+# HTTP clients
+httpx==0.27.0
+requests==2.32.0
+
+# Solar physics — PINNED to prevent silent accuracy regressions
+# Upgrade only after re-running the Phase-1 accuracy bench (compare_accuracy.py)
+pvlib==0.11.1
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+
+# Date / timezone
+python-dateutil==2.9.0
+pytz==2024.1
+
+# Config
+python-dotenv==1.0.1
+pydantic-settings==2.3.4
+
+# Scheduler (P1-E: APScheduler internal cadence)
+apscheduler==3.10.4
+
+# Timezone (zoneinfo backport for Python < 3.9, noop on 3.12)
+tzdata==2024.1

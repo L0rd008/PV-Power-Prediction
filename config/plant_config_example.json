@@ -1,52 +1,44 @@
 {
   "plant_name": "Example 55kW Rooftop Plant",
-  "description": "Sample configuration - modify for your specific plant",
-  
-  "api": {
-    "solcast_key": "YOUR_SOLCAST_API_KEY",
-    "period": "PT60M"
-  },
-  
+  "description": "Sample configuration — store this JSON as the 'pvlib_config' SERVER_SCOPE attribute on the plant asset in ThingsBoard.",
+
   "location": {
     "lat": 8.342368984714714,
     "lon": 80.37623529556957,
     "altitude_m": 88,
     "timezone": "Asia/Colombo"
   },
-  
+
   "orientations": [
-    {"tilt": 18, "azimuth": 148, "name": "O1", "module_count": 18},
-    {"tilt": 18, "azimuth": -32, "name": "O2", "module_count": 18},
-    {"tilt": 19, "azimuth": 55, "name": "O3", "module_count": 36},
-    {"tilt": 19, "azimuth": -125, "name": "O4", "module_count": 36},
-    {"tilt": 18, "azimuth": -125, "name": "O5", "module_count": 36},
-    {"tilt": 18, "azimuth": 55, "name": "O6", "module_count": 36},
-    {"tilt": 27, "azimuth": -125, "name": "O7", "module_count": 18},
-    {"tilt": 27, "azimuth": 55, "name": "O8", "module_count": 18}
+    {"name": "O1", "tilt": 18, "azimuth": 148,  "module_count": 18, "use_measured_poa": false},
+    {"name": "O2", "tilt": 18, "azimuth": -32,   "module_count": 18, "use_measured_poa": false},
+    {"name": "O3", "tilt": 19, "azimuth": 55,    "module_count": 36, "use_measured_poa": false},
+    {"name": "O4", "tilt": 19, "azimuth": -125,  "module_count": 36, "use_measured_poa": false},
+    {"name": "O5", "tilt": 18, "azimuth": -125,  "module_count": 36, "use_measured_poa": false},
+    {"name": "O6", "tilt": 18, "azimuth": 55,    "module_count": 36, "use_measured_poa": false},
+    {"name": "O7", "tilt": 27, "azimuth": -125,  "module_count": 18, "use_measured_poa": false},
+    {"name": "O8", "tilt": 27, "azimuth": 55,    "module_count": 18, "use_measured_poa": false}
   ],
-  
+
   "module": {
     "area_m2": 2.556,
     "efficiency_stc": 0.2153,
     "gamma_p": -0.00340
   },
-  
+
   "inverter": {
     "ac_rating_kw": 55.0,
     "dc_threshold_kw": 0.0,
     "use_efficiency_curve": true,
-    "efficiency_curve_kw": [
-      2.43, 4.74, 4.99, 7.18, 9.99, 12.23, 14.92, 17.42, 20.04, 22.28, 24.91,
-      27.53, 30.02, 32.46, 34.96, 37.52, 40.07, 42.57, 45.19, 47.50, 50.00
-    ],
-    "efficiency_curve_eta": [
-      0.95238, 0.97151, 0.97270, 0.97724, 0.98016, 0.98168, 0.98222, 0.98254,
-      0.98276, 0.98286, 0.98276, 0.98254, 0.98222, 0.98189, 0.98146, 0.98103,
-      0.98059, 0.98016, 0.97973, 0.97930, 0.97876
-    ],
+    "efficiency_curve_kw":  [2.43, 4.74, 4.99, 7.18, 9.99, 12.23, 14.92, 17.42, 20.04,
+                              22.28, 24.91, 27.53, 30.02, 32.46, 34.96, 37.52, 40.07,
+                              42.57, 45.19, 47.50, 50.00],
+    "efficiency_curve_eta": [0.95238, 0.97151, 0.97270, 0.97724, 0.98016, 0.98168, 0.98222,
+                              0.98254, 0.98276, 0.98286, 0.98276, 0.98254, 0.98222, 0.98189,
+                              0.98146, 0.98103, 0.98059, 0.98016, 0.97973, 0.97930, 0.97876],
     "flat_efficiency": 0.98
   },
-  
+
   "losses": {
     "soiling": 0.03,
     "lid": 0.014,
@@ -57,22 +49,38 @@
     "albedo": 0.20,
     "far_shading": 1.0
   },
-  
+
   "iam": {
     "angles": [0, 25, 45, 60, 65, 70, 75, 80, 90],
-    "values": [1.000, 1.000, 0.995, 0.962, 0.936, 0.903, 0.851, 0.754, 0.000]
+    "values":  [1.000, 1.000, 0.995, 0.962, 0.936, 0.903, 0.851, 0.754, 0.000]
   },
-  
+
   "thermal_model": "close_mount_glass_glass",
-  
+
+  "station": {
+    "_comment": "Telemetry key names as they appear on the plant asset in ThingsBoard.",
+    "ghi_key":       "ghi",
+    "poa_key":       null,
+    "air_temp_key":  "air_temperature",
+    "wind_speed_key": "wind_speed",
+    "freshness_minutes":   10,
+    "sanity_max_ghi_wm2":  1400,
+    "sanity_max_poa_wm2":  1500
+  },
+
   "defaults": {
     "wind_speed_ms": 1.0,
     "air_temp_c": 25.0
   },
-  
-  "date_range": {
-    "start": "2025-12-10T00:00:00Z",
-    "end": "2025-12-16T23:00:00Z"
+
+  "solcast_resource_id": null,
+
+  "_notes": {
+    "pvlib_config_attribute": "Store this entire JSON object as a ThingsBoard SERVER_SCOPE attribute named 'pvlib_config' on the plant asset.",
+    "use_measured_poa": "Set use_measured_poa=true on an orientation AND set poa_key in station{} to skip Perez transposition for that orientation — uses the direct sensor reading instead.",
+    "module_quality": "Negative value = quality gain (PVsyst convention). e.g. -0.008 means modules produce 0.8% above nameplate.",
+    "far_shading": "1.0 = no shading. Values < 1.0 are applied to POA before IAM, matching PVsyst loss-diagram order.",
+    "azimuth_convention": "PVsyst: 0=South, +90=West, -90=East, ±180=North.",
+    "thermal_model": "Any key from pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS['sapm']. Common: 'open_rack_glass_glass', 'close_mount_glass_glass', 'open_rack_glass_polymer'."
   }
 }
-

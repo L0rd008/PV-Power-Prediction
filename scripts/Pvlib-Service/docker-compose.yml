@@ -1,0 +1,60 @@
+# ============================================================
+# Pvlib-Service — local development / single-EC2 deployment
+#
+# H-C4 deployment pattern: one image, one container per mode.
+# All three containers share the same image; MODE selects behaviour.
+#
+# Usage:
+#   docker compose up --build          # build + start all services
+#   docker compose up pvlib-service    # start only the pvlib service
+#   docker compose logs -f pvlib-service
+# ============================================================
+
+version: "3.9"
+
+services:
+
+  # ── Pvlib physics service (this repo) ─────────────────────────────────
+  pvlib-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: power-prediction:latest
+    container_name: pvlib-service
+    restart: unless-stopped
+    ports:
+      - "8002:8000"          # host:container  (8000=solcast, 8001=simple, 8002=pvlib)
+    env_file:
+      - .env
+    environment:
+      - MODE=pvlib
+    volumes:
+      - pvlib_logs:/app/logs
+    healthcheck:
+      # /health returns 503 if scheduler has stalled > 120 s (P5 watchdog gate)
+      test: ["CMD", "python", "-c",
+             "import httpx; r=httpx.get('http://localhost:8000/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── (Optional) Caddy reverse proxy for TLS termination ────────────────
+  # Uncomment when deploying to EC2 with a real domain.
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+
+volumes:
+  pvlib_logs:
+  # caddy_data:
+  # caddy_config:

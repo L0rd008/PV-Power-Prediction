@@ -1,0 +1,94 @@
+"""
+Application settings using pydantic-settings v2.
+
+Loads configuration from environment variables and .env file.
+Supports ThingsBoard connection, scheduler settings, data sources, and service mode.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application configuration loaded from environment variables and .env file."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # ThingsBoard connection
+    TB_HOST: str = "https://localhost"
+    """ThingsBoard API endpoint URL."""
+
+    TB_USERNAME: str = ""
+    """ThingsBoard username for authentication."""
+
+    TB_PASSWORD: str = ""
+    """ThingsBoard password for authentication."""
+
+    TB_ROOT_ASSET_IDS: str = ""
+    """Comma-separated list of root asset IDs to discover plants from."""
+
+    # Scheduler configuration
+    SCHEDULER_ENABLED: bool = True
+    """Enable/disable automatic scheduler."""
+
+    SCHEDULER_INTERVAL_MINUTES: int = 1
+    """Interval between scheduler cycles in minutes."""
+
+    READ_LAG_SECONDS: int = 30
+    """Seconds behind 'now' to start the read window (accounts for TB ingestion lag)."""
+
+    READ_WINDOW_SECONDS: int = 90
+    """Width of the telemetry read window in seconds."""
+
+    MAX_CONCURRENT_PLANTS: int = 5
+    """Maximum number of plants processed concurrently per scheduler cycle."""
+
+    # Data sources
+    SOLCAST_API_KEY: Optional[str] = None
+    """API key for Solcast solar forecast service (optional)."""
+
+    TZ_LOCAL: str = "Asia/Colombo"
+    """Local timezone for the service (used for scheduling and reporting)."""
+
+    # Service configuration
+    MODE: str = "pvlib"
+    """Service operation mode (e.g., 'pvlib', 'simple', 'solcast')."""
+
+    LOG_LEVEL: str = "INFO"
+    """Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."""
+
+    DEBUG: bool = False
+    """Enable debug mode for verbose logging and development features."""
+
+    @property
+    def root_asset_ids(self) -> list[str]:
+        """Parse comma-separated root asset IDs into a list of stripped strings."""
+        return [x.strip() for x in self.TB_ROOT_ASSET_IDS.split(",") if x.strip()]
+
+    @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Ensure positive integer values for time and concurrency parameters."""
+        if v <= 0:
+            raise ValueError("Value must be positive")
+        return v
+
+    @field_validator("LOG_LEVEL")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        """Validate log level against standard logging levels."""
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if v.upper() not in valid_levels:
+            raise ValueError(f"LOG_LEVEL must be one of {valid_levels}")
+        return v.upper()
+
+
+# Global singleton settings instance
+settings = Settings()
