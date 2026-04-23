@@ -2,7 +2,7 @@
 # 1) USER INPUTS (Solcast + PVsyst + Plant Geometry): MUST ADJUST
 # =====================================================================
 
-API_KEY = "2qtVZAyU-ybH99YGHy3bRUxQK_3zO58S"
+API_KEY = "YOUR_SOLCAST_API_KEY"
 lat, lon = 8.342368984714714, 80.37623529556957
 period = "PT60M"
 TIMEZONE = "Asia/Colombo"
