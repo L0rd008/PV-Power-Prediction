@@ -1,0 +1,24 @@
+{
+  "new_model": {
+    "label": "New model (H-A3)",
+    "n_points": 2384,
+    "mape_pct": 2206.395,
+    "mae_kw": 3952.2,
+    "rmse_kw": 72070.57,
+    "bias_kw": -2558.13,
+    "energy_actual_kwh": 10135936.4,
+    "energy_predicted_kwh": 4037348.0,
+    "energy_error_pct": -60.168
+  },
+  "old_model": {
+    "label": "Old model",
+    "n_points": 2384,
+    "mape_pct": 2206.395,
+    "mae_kw": 3952.2,
+    "rmse_kw": 72070.57,
+    "bias_kw": -2558.13,
+    "energy_actual_kwh": 10135936.4,
+    "energy_predicted_kwh": 4037348.0,
+    "energy_error_pct": -60.168
+  }
+}
