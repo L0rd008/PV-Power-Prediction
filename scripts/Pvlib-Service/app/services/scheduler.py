@@ -1,22 +1,27 @@
 """
-APScheduler-based 1-minute cycle scheduler (P1-E).
+APScheduler-based scheduler (P1-E, Phase B).
+
+Jobs:
+  pvlib_cycle  — interval every SCHEDULER_INTERVAL_MINUTES, runs run_cycle_now()
+  pvlib_daily  — cron 00:05 local time (TZ_LOCAL), runs run_daily_rollup()
 
 Design decisions:
-  - AsyncIOScheduler runs inside the same event loop as FastAPI/Uvicorn (single-worker)
-  - max_instances=1 ensures cycles never overlap; a slow cycle is skipped, not queued
-  - misfire_grace_time=30 catches one missed cycle after a brief hiccup
-  - Bounded concurrency via asyncio.Semaphore(MAX_CONCURRENT_PLANTS)
-  - Read window: [now - READ_LAG_SECONDS - READ_WINDOW_SECONDS, now - READ_LAG_SECONDS]
-    so TB has time to receive station telemetry before we read it
-  - last_cycle state is written here and exposed to /health
+  - AsyncIOScheduler uses timezone=ZoneInfo(TZ_LOCAL) so cron midnight triggers
+    fire at local midnight regardless of server TZ (Gap 4/14).
+  - max_instances=1 ensures cycles never overlap.
+  - misfire_grace_time=30s on the minute job; 3600s on the daily job (Gap B Edge E13).
+  - The old _sync_cycle_job bridge is removed (Gap 11 — dead code with 3.12 trap).
+  - Singleton TB client injected at start_scheduler() call (Phase C, Gap 12).
+  - last_cycle_state written here and exposed to /health.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -28,6 +33,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class CycleState:
     """Mutable state shared with the /health endpoint."""
+    service_started_at: Optional[datetime] = None
     last_cycle_started_at: Optional[datetime] = None
     last_cycle_finished_at: Optional[datetime] = None
     last_cycle_duration_ms: Optional[float] = None
@@ -41,11 +47,15 @@ class CycleState:
 cycle_state = CycleState()
 _scheduler: Optional[AsyncIOScheduler] = None
 
+# Injected singleton TB client (set by main.py lifespan in Phase C)
+_tb_client = None
+
 
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
-        _scheduler = AsyncIOScheduler(timezone="UTC")
+        # Use local timezone so daily cron fires at correct local midnight (Gap 4/14)
+        _scheduler = AsyncIOScheduler(timezone=ZoneInfo(settings.TZ_LOCAL))
     return _scheduler
 
 
@@ -66,9 +76,12 @@ async def run_cycle_now(tb_client=None) -> dict:
     cycle_state.last_cycle_started_at = now_utc
     t0 = asyncio.get_event_loop().time()
 
+    # Prefer the injected singleton; fall back to per-cycle construction (Phase A compat)
+    effective_client = tb_client or _tb_client
+
     try:
-        if tb_client is not None:
-            svc = ForecastService(tb_client, solcast_api_key=settings.SOLCAST_API_KEY)
+        if effective_client is not None:
+            svc = ForecastService(effective_client, solcast_api_key=settings.SOLCAST_API_KEY)
             summary = await svc.run_fleet_cycle(
                 root_asset_ids=root_ids,
                 start=window_start,
@@ -110,22 +123,59 @@ async def run_cycle_now(tb_client=None) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
-def _sync_cycle_job():
-    """APScheduler calls sync functions; bridge to async."""
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        asyncio.ensure_future(run_cycle_now())
-    else:
-        loop.run_until_complete(run_cycle_now())
+async def run_weekly_eval_now(tb_client=None) -> dict:
+    """Trigger the weekly accuracy evaluation immediately (used by /admin/run-weekly and the cron)."""
+    from app.services.weekly_eval import run_weekly_eval
+
+    effective_client = tb_client or _tb_client
+    try:
+        return await run_weekly_eval(tb_client=effective_client)
+    except Exception as exc:
+        log.exception("run_weekly_eval_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
 
 
-def start_scheduler() -> None:
-    """Start the APScheduler if SCHEDULER_ENABLED is true."""
+async def run_daily_now(date: Optional[datetime] = None) -> dict:
+    """Trigger the daily roll-up job immediately (used by /admin/run-daily and the cron)."""
+    from app.services.daily_job import run_daily_rollup
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    effective_client = _tb_client
+
+    try:
+        if effective_client is not None:
+            return await run_daily_rollup(effective_client, date=date)
+        else:
+            async with ThingsBoardClient(
+                settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+            ) as tb:
+                return await run_daily_rollup(tb, date=date)
+    except Exception as exc:
+        log.exception("run_daily_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+def start_scheduler(tb_client=None) -> None:
+    """Start APScheduler if SCHEDULER_ENABLED is true.
+
+    Parameters
+    ----------
+    tb_client : ThingsBoardClient, optional
+        Singleton client injected from main.py lifespan (Phase C, Gap 12).
+        If None, a new client is created per cycle (Phase A/B behaviour).
+    """
+    global _tb_client
+    if tb_client is not None:
+        _tb_client = tb_client
+
     if not settings.SCHEDULER_ENABLED:
         log.info("scheduler: disabled (SCHEDULER_ENABLED=false)")
         return
 
+    cycle_state.service_started_at = datetime.now(timezone.utc)
     scheduler = get_scheduler()
+
+    # 1-minute cycle job
     scheduler.add_job(
         run_cycle_now,
         trigger="interval",
@@ -136,9 +186,42 @@ def start_scheduler() -> None:
         replace_existing=True,
         coalesce=True,
     )
+
+    # Daily energy job: cron at 00:05 local time (Gap 3 / B)
+    # misfire_grace_time=3600 handles the case where the service was down at 00:05
+    # and restarts within the hour — the job fires immediately (Edge E13).
+    scheduler.add_job(
+        run_daily_now,
+        trigger="cron",
+        hour=0,
+        minute=5,
+        misfire_grace_time=3600,
+        max_instances=1,
+        id="pvlib_daily",
+        replace_existing=True,
+    )
+
+    # Weekly accuracy evaluation: cron at 02:00 every Sunday (Gap 20 / F)
+    # misfire_grace_time=7200 (2 h): catches a restart within 2 hours of the window.
+    scheduler.add_job(
+        run_weekly_eval_now,
+        trigger="cron",
+        day_of_week="sun",
+        hour=2,
+        minute=0,
+        misfire_grace_time=7200,
+        max_instances=1,
+        id="pvlib_weekly_eval",
+        replace_existing=True,
+    )
+
     scheduler.start()
-    log.info("scheduler: started — interval %d min, max_concurrent %d plants",
-             settings.SCHEDULER_INTERVAL_MINUTES, settings.MAX_CONCURRENT_PLANTS)
+    log.info(
+        "scheduler: started — interval %d min, daily cron 00:05 %s, max_concurrent %d plants",
+        settings.SCHEDULER_INTERVAL_MINUTES,
+        settings.TZ_LOCAL,
+        settings.MAX_CONCURRENT_PLANTS,
+    )
 
 
 def stop_scheduler() -> None:

@@ -199,8 +199,13 @@ def compute_ac_power(
     # ── Step 9: AC wiring loss ────────────────────────────────────────────
     pac_kw = pac_kw * (1.0 - config.ac_wiring)
 
-    # Zero out night-time (GHI == 0 and no measured POA)
-    night_mask = (ghi <= 0.0) & (poa_measured.fillna(0.0) <= 0.0)
+    # Zero out night-time (Gap 25: use effective irradiance so POA-only stations work correctly)
+    # For POA-only stations, ghi is zero but poa_global is the real signal.
+    # Use the effective irradiance that was actually computed in the orientation loop.
+    # poa_global is the last orientation's value; for a single-orientation plant this is correct.
+    # For multi-orientation plants, any orientation with POA > 1 W/m² should prevent zeroing.
+    effective_irr = poa_measured.fillna(0.0) if poa_measured.notna().any() else ghi
+    night_mask = effective_irr.fillna(0.0) <= 1.0   # sub-threshold (accounts for sensor noise)
     pac_kw[night_mask] = 0.0
 
     return pd.DataFrame(

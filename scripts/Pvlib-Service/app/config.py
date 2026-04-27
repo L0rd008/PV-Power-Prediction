@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     TZ_LOCAL: str = "Asia/Colombo"
     """Local timezone for the service (used for scheduling and reporting)."""
 
+    # Weekly accuracy evaluation (Gap 20)
+    EVAL_PLANT_IDS: str = ""
+    """Comma-separated asset IDs of plants to include in the weekly accuracy report.
+    Set to KSP / SOU / SSK asset UUIDs in production.  Empty = job is a no-op."""
+
+    EVAL_ACTUAL_DAILY_KEY: str = "daily_energy_kwh"
+    """TB timeseries key holding the metered daily energy (kWh) for each plant.
+    Written by the site data pipeline; used as ground truth in weekly_eval."""
+
     # Service configuration
     MODE: str = "pvlib"
     """Service operation mode (e.g., 'pvlib', 'simple', 'solcast')."""
@@ -66,6 +75,11 @@ class Settings(BaseSettings):
 
     DEBUG: bool = False
     """Enable debug mode for verbose logging and development features."""
+
+    @property
+    def eval_plant_ids(self) -> list[str]:
+        """Parse comma-separated eval plant IDs into a list of stripped strings."""
+        return [x.strip() for x in self.EVAL_PLANT_IDS.split(",") if x.strip()]
 
     @property
     def root_asset_ids(self) -> list[str]:

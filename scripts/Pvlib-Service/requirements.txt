@@ -32,3 +32,10 @@ apscheduler==3.10.4
 
 # Timezone (zoneinfo backport for Python < 3.9, noop on 3.12)
 tzdata==2024.1
+
+# Retry / backoff (Phase C, Gap 22)
+tenacity==8.2.3
+
+# Testing
+pytest==8.2.0
+pytest-asyncio==0.23.6
