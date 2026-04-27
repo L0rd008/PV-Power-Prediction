@@ -20,6 +20,14 @@ env/
 
 # Config with API keys (use plant_config_example.json as template)
 config/plant_config.json
+config/kebithigollewa_pvlib_config.json
+
+# Local notes/docs that may contain sensitive values
+docs/Business_Intelligence_Findings.md
+docs/config_notes.md
+
+# Local service secrets
+scripts/Pvlib-Service/.env
 
 # Temporary files
 *.nc
@@ -44,6 +52,7 @@ output/monthly/*.csv
 Thumbs.db
 
 # Imported/legacy service artifacts
+Green-Power-Services-main/
 Green-Power-Services-main/venv/
 Green-Power-Services-main/**/__pycache__/
 Green-Power-Services-main/**/logs/
