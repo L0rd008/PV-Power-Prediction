@@ -1,0 +1,6 @@
+# ============================================================
+# LOCAL-ONLY requirements for Python 3.12 smoke testing.
+# Keep local validation aligned with the production runtime.
+# ============================================================
+
+-r requirements.txt

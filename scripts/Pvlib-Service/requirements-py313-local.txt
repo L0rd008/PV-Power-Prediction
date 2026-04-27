@@ -1,0 +1,5 @@
+# Deprecated: local smoke testing is now aligned to Python 3.12.
+# Use `requirements-py312-local.txt` with `py -3.12`.
+# This file remains only as a breadcrumb for older instructions.
+
+-r requirements-py312-local.txt

@@ -1,0 +1,178 @@
+{
+  "_comment": [
+    "pvlib-service watchdog rule chain — ThingsBoard PE import stub (Gap 19).",
+    "",
+    "HOW TO IMPORT:",
+    "  1. ThingsBoard UI → Rule Chains → Import Rule Chain → select this file.",
+    "  2. Open the imported chain; find the 'Constant — pvlib host' node.",
+    "  3. Set its value to your pvlib-service /health URL, e.g.:",
+    "        http://pvlib-service:8000/health",
+    "  4. Create (or designate) a heartbeat device named 'pvlib-watchdog'",
+    "     in the same tenant.  The alarm will be raised on that device.",
+    "  5. Save & activate the chain.",
+    "",
+    "BEHAVIOUR:",
+    "  - Generator fires every 5 minutes.",
+    "  - REST API Call GETs {pvlib_host}/health.",
+    "  - Switch node:",
+    "       branch 'stalled' → HTTP status >= 500  OR  body.status != 'ok'",
+    "       branch 'ok'      → HTTP status 2xx  AND  body.status == 'ok'",
+    "  - On 'stalled': raise CRITICAL alarm 'pvlib_service_stalled' on the heartbeat device.",
+    "  - On 'ok':      clear any active 'pvlib_service_stalled' alarm.",
+    "",
+    "ALARM DETAILS:",
+    "  type:     pvlib_service_stalled",
+    "  severity: CRITICAL",
+    "  details:  { status, last_cycle_finished_at, stale_seconds }  (from /health body)"
+  ],
+  "ruleChain": {
+    "name": "pvlib-service Watchdog",
+    "type": "CORE",
+    "debugMode": false,
+    "firstRuleNodeId": {
+      "entityType": "RULE_NODE",
+      "id": "node-generator"
+    }
+  },
+  "metadata": {
+    "nodes": [
+      {
+        "id": "node-generator",
+        "type": "org.thingsboard.rule.engine.debug.TbMsgGeneratorNode",
+        "name": "Generator — every 5 min",
+        "debugMode": false,
+        "configuration": {
+          "msgCount": 0,
+          "periodInSeconds": 300,
+          "originatorId": null,
+          "originatorType": null,
+          "scriptLang": "JS",
+          "jsScript": "var msg = {}; var metadata = { 'triggerType': 'watchdog' }; var msgType = 'WATCHDOG_TICK'; return { msg: msg, metadata: metadata, msgType: msgType };"
+        },
+        "additionalInfo": {
+          "description": "Triggers a health-check every 5 minutes.",
+          "layoutX": 50,
+          "layoutY": 200
+        }
+      },
+      {
+        "id": "node-constant",
+        "type": "org.thingsboard.rule.engine.transform.TbChangeOriginatorNode",
+        "name": "Constant — pvlib host",
+        "debugMode": false,
+        "configuration": {
+          "_operator_instruction": "Replace the URL below with the actual pvlib-service /health endpoint before activating.",
+          "originatorSource": "CUSTOMER",
+          "customerSource": "RELATED"
+        },
+        "_comment": "This node is a placeholder.  In practice, embed the URL as a metadata constant in the Script Transform node below.",
+        "additionalInfo": {
+          "layoutX": 250,
+          "layoutY": 200
+        }
+      },
+      {
+        "id": "node-set-url",
+        "type": "org.thingsboard.rule.engine.transform.TbTransformMsgNode",
+        "name": "Set health URL",
+        "debugMode": false,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "// *** OPERATOR: set PVLIB_HEALTH_URL to your pvlib-service /health endpoint ***\nvar PVLIB_HEALTH_URL = 'http://pvlib-service:8000/health';\nmetadata['pvlibHealthUrl'] = PVLIB_HEALTH_URL;\nreturn { msg: msg, metadata: metadata, msgType: msgType };"
+        },
+        "additionalInfo": {
+          "description": "Edit PVLIB_HEALTH_URL to point to your pvlib-service instance.",
+          "layoutX": 450,
+          "layoutY": 200
+        }
+      },
+      {
+        "id": "node-rest-call",
+        "type": "org.thingsboard.rule.engine.rest.TbRestApiCallNode",
+        "name": "GET /health",
+        "debugMode": false,
+        "configuration": {
+          "restEndpointUrlPattern": "${pvlibHealthUrl}",
+          "requestMethod": "GET",
+          "useSimpleClientHttpFactory": false,
+          "readTimeoutMs": 10000,
+          "maxParallelRequestsCount": 1,
+          "headers": {},
+          "useRedirectStrategy": true,
+          "trimDoubleQuotes": false,
+          "parseToPlainText": false,
+          "ignoreRequestBody": true,
+          "enableProxy": false,
+          "credentials": {
+            "type": "anonymous"
+          }
+        },
+        "additionalInfo": {
+          "description": "HTTP GET to pvlib-service /health.  Response body injected as msg.",
+          "layoutX": 700,
+          "layoutY": 200
+        }
+      },
+      {
+        "id": "node-switch",
+        "type": "org.thingsboard.rule.engine.filter.TbSwitchNode",
+        "name": "Stalled or OK?",
+        "debugMode": false,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "// Returns 'stalled' when HTTP error OR status != 'ok'; otherwise 'ok'.\nvar httpStatus = parseInt(metadata['status'] || '0', 10);\nif (httpStatus >= 500 || httpStatus === 0) { return ['stalled']; }\ntry {\n  var body = (typeof msg === 'string') ? JSON.parse(msg) : msg;\n  if (body && body.status === 'ok') { return ['ok']; }\n  return ['stalled'];\n} catch(e) { return ['stalled']; }"
+        },
+        "additionalInfo": {
+          "layoutX": 950,
+          "layoutY": 200
+        }
+      },
+      {
+        "id": "node-raise-alarm",
+        "type": "org.thingsboard.rule.engine.action.TbCreateAlarmNode",
+        "name": "Raise CRITICAL alarm",
+        "debugMode": false,
+        "configuration": {
+          "scriptLang": "JS",
+          "alarmType": "pvlib_service_stalled",
+          "alarmDetailsBuildJs": "var details = {};\ntry {\n  var body = (typeof msg === 'string') ? JSON.parse(msg) : msg;\n  details.status = body.status;\n  details.last_cycle_finished_at = body.last_cycle_finished_at;\n  details.stale_seconds = body.stale_seconds;\n  details.last_cycle_failures = body.last_cycle_failures;\n} catch(e) { details.raw = String(msg); }\nreturn details;",
+          "severity": "CRITICAL",
+          "propagate": true,
+          "propagateToOwner": true,
+          "propagateToTenant": false,
+          "propagateRelationTypes": []
+        },
+        "additionalInfo": {
+          "description": "Raises alarm on the pvlib-watchdog heartbeat device.",
+          "layoutX": 1200,
+          "layoutY": 100
+        }
+      },
+      {
+        "id": "node-clear-alarm",
+        "type": "org.thingsboard.rule.engine.action.TbClearAlarmNode",
+        "name": "Clear alarm",
+        "debugMode": false,
+        "configuration": {
+          "scriptLang": "JS",
+          "alarmType": "pvlib_service_stalled",
+          "alarmDetailsBuildJs": "return { clearedAt: new Date().toISOString() };"
+        },
+        "additionalInfo": {
+          "description": "Clears any active pvlib_service_stalled alarm when /health returns ok.",
+          "layoutX": 1200,
+          "layoutY": 300
+        }
+      }
+    ],
+    "connections": [
+      { "fromIndex": 0, "toIndex": 1, "type": "Success" },
+      { "fromIndex": 1, "toIndex": 2, "type": "Success" },
+      { "fromIndex": 2, "toIndex": 3, "type": "Success" },
+      { "fromIndex": 3, "toIndex": 4, "type": "Success" },
+      { "fromIndex": 4, "toIndex": 5, "type": "stalled" },
+      { "fromIndex": 4, "toIndex": 6, "type": "ok" }
+    ],
+    "ruleChainConnections": null
+  }
+}
