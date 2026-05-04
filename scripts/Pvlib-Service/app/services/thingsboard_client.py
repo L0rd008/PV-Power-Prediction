@@ -241,6 +241,36 @@ class ThingsBoardClient:
 
     # ── Telemetry writes ────────────────────────────────────────────────────
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=5.0),
+        retry=retry_if_exception(_should_retry),
+        reraise=True,
+    )
+    async def post_attributes(
+        self,
+        entity_type: str,
+        entity_id: str,
+        scope: str,
+        payload: dict,
+    ) -> None:
+        """Write SERVER_SCOPE (or any scope) attributes for an entity.
+
+        TB REST endpoint:
+          POST /api/plugins/telemetry/{entityType}/{entityId}/attributes/{scope}
+          body: {"key1": value1, "key2": value2}
+
+        Note: the write path is /attributes/{scope} (NOT /values/attributes/{scope}
+        which is the read path used by get_asset_attributes).
+
+        Used by the loss-rollup job to persist the six lifetime cumulative attributes
+        and the anchor-date / updated-at tracking fields.
+        """
+        await self._ensure_token()
+        url = f"{self._host}/api/plugins/telemetry/{entity_type}/{entity_id}/attributes/{scope}"
+        resp = await self._http.post(url, headers=self._headers(), json=payload)
+        resp.raise_for_status()
+
     async def post_telemetry(
         self,
         entity_type: str,

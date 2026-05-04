@@ -135,6 +135,30 @@ async def run_weekly_eval_now(tb_client=None) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
+async def run_loss_rollup_now(date: Optional[datetime] = None) -> dict:
+    """Trigger the daily loss-rollup job immediately (used by /admin/run-loss-rollup and the cron)."""
+    if not settings.LOSS_ROLLUP_ENABLED:
+        log.debug("run_loss_rollup_now: LOSS_ROLLUP_ENABLED=false — skipping")
+        return {"status": "disabled"}
+
+    from app.services.loss_rollup_job import run_loss_rollup
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    effective_client = _tb_client
+
+    try:
+        if effective_client is not None:
+            return await run_loss_rollup(effective_client, date=date)
+        else:
+            async with ThingsBoardClient(
+                settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+            ) as tb:
+                return await run_loss_rollup(tb, date=date)
+    except Exception as exc:
+        log.exception("run_loss_rollup_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 async def run_daily_now(date: Optional[datetime] = None) -> dict:
     """Trigger the daily roll-up job immediately (used by /admin/run-daily and the cron)."""
     from app.services.daily_job import run_daily_rollup
@@ -200,6 +224,23 @@ def start_scheduler(tb_client=None) -> None:
         id="pvlib_daily",
         replace_existing=True,
     )
+
+    # Daily loss roll-up: cron at 00:10 local time (5 min after energy job at 00:05).
+    # Gated on LOSS_ROLLUP_ENABLED — no-op when false so flag is safe to deploy disabled.
+    if settings.LOSS_ROLLUP_ENABLED:
+        scheduler.add_job(
+            run_loss_rollup_now,
+            trigger="cron",
+            hour=0,
+            minute=10,
+            misfire_grace_time=3600,
+            max_instances=1,
+            id="pvlib_loss_rollup",
+            replace_existing=True,
+        )
+        log.info("scheduler: loss rollup cron registered at 00:10 %s", settings.TZ_LOCAL)
+    else:
+        log.info("scheduler: loss rollup cron NOT registered (LOSS_ROLLUP_ENABLED=false)")
 
     # Weekly accuracy evaluation: cron at 02:00 every Sunday (Gap 20 / F)
     # misfire_grace_time=7200 (2 h): catches a restart within 2 hours of the window.

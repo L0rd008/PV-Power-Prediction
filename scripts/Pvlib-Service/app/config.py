@@ -86,6 +86,23 @@ class Settings(BaseSettings):
         """Parse comma-separated root asset IDs into a list of stripped strings."""
         return [x.strip() for x in self.TB_ROOT_ASSET_IDS.split(",") if x.strip()]
 
+    # Loss roll-up job (Phase L0+)
+    LOSS_ROLLUP_ENABLED: bool = False
+    """Master flag for the daily loss-rollup job. Default false until Phase L1.
+    Set to true in .env after manual verification of a single plant (Phase L1)."""
+
+    LOSS_DEFAULT_SETPOINT_KEYS: str = "setpoint_active_power,curtailment_limit,power_limit"
+    """Comma-separated default setpoint keys used for curtailment ceiling calculation.
+    Per-plant 'setpoint_keys' attribute overrides this when present."""
+
+    LOSS_MIN_VALID_SAMPLES: int = 360
+    """Minimum 1-min samples per day to produce a real daily loss value.
+    Below this threshold (< 6 h of data), write -1 sentinel for all keys."""
+
+    LOSS_LIFETIME_PAGE_DAYS: int = 90
+    """Page size in days when paging history during /admin/recompute-lifetime.
+    Keeps individual TB timeseries reads under ~130 k rows per call."""
+
     @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

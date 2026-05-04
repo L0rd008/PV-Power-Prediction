@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.job_manager import job_manager
-from app.services.scheduler import cycle_state, run_cycle_now, run_daily_now
+from app.services.scheduler import cycle_state, run_cycle_now, run_daily_now, run_loss_rollup_now
 
 router = APIRouter()
 
@@ -291,6 +291,130 @@ async def admin_run_daily(date: Optional[str] = Query(None)):
         "date": date or "yesterday",
         "triggered_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.post("/admin/run-loss-rollup")
+async def admin_run_loss_rollup(
+    start: Optional[str] = Query(None, description="Start date YYYY-MM-DD (inclusive). Defaults to yesterday."),
+    end: Optional[str] = Query(None, description="End date YYYY-MM-DD (inclusive). Defaults to start."),
+):
+    """Trigger the daily loss-rollup job for a date range (backfill) or for yesterday.
+
+    Runs synchronously per day and returns a combined summary once all days complete.
+    For large backfills (many years), consider running one month at a time.
+
+    Examples
+    --------
+    /admin/run-loss-rollup                         → yesterday only
+    /admin/run-loss-rollup?start=2026-04-01        → 2026-04-01 only
+    /admin/run-loss-rollup?start=2026-01-01&end=2026-04-30  → 4-month backfill
+    """
+    import asyncio
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(settings.TZ_LOCAL)
+
+    def _parse_date(s: str) -> _date:
+        try:
+            return _date.fromisoformat(s)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {s!r}. Use YYYY-MM-DD.")
+
+    today_local = datetime.now(tz).date()
+
+    if start is None:
+        start_date = today_local - timedelta(days=1)
+    else:
+        start_date = _parse_date(start)
+
+    end_date = _parse_date(end) if end else start_date
+
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end must be >= start")
+
+    if not settings.LOSS_ROLLUP_ENABLED:
+        # Allow backfill even when the daily cron is disabled (operator opt-in)
+        pass  # run_loss_rollup_now will handle the flag for the cron; backfill bypasses it
+
+    results = []
+    cursor = start_date
+
+    from app.services.loss_rollup_job import run_loss_rollup
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        while cursor <= end_date:
+            # Align to local midnight of the day AFTER cursor (the day we want to compute)
+            target_dt = datetime(
+                cursor.year, cursor.month, cursor.day,
+                tzinfo=tz,
+            ) + timedelta(days=1)
+            try:
+                summary = await run_loss_rollup(tb, date=target_dt)
+            except Exception as exc:
+                summary = {"date": str(cursor), "status": "error", "error": str(exc)}
+            results.append(summary)
+            cursor += timedelta(days=1)
+
+    total_ok = sum(r.get("plants_ok", 0) for r in results)
+    total_failed = sum(r.get("plants_failed", 0) for r in results)
+
+    return {
+        "status": "done",
+        "days": len(results),
+        "plants_ok_total": total_ok,
+        "plants_failed_total": total_failed,
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "results": results,
+    }
+
+
+@router.post("/admin/recompute-lifetime")
+async def admin_recompute_lifetime(
+    asset_id: Optional[str] = Query(None, description="Asset UUID to recompute. Omit for fleet-wide."),
+):
+    """Recompute lifetime cumulative loss attributes by summing the entire daily-key history.
+
+    Fleet-wide when asset_id is omitted; single asset when provided.
+    For large fleets this may take several minutes — returns once complete.
+
+    Verification: loss_grid_lifetime_kwh should equal Σ(loss_grid_daily_kwh) to within 0.1%.
+    """
+    from app.services.loss_rollup_job import recompute_lifetime_for_fleet
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await recompute_lifetime_for_fleet(tb, asset_id=asset_id)
+
+    result["triggered_at"] = datetime.now(timezone.utc).isoformat()
+    return result
+
+
+@router.get("/admin/loss-status")
+async def admin_loss_status(
+    asset_id: str = Query(..., description="Asset UUID to inspect."),
+):
+    """Return latest daily loss key values and all lifetime attributes for one asset.
+
+    Useful for sanity checks during Phase L1–L4 rollout.
+    """
+    from app.services.loss_rollup_job import get_loss_status
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    if not asset_id:
+        raise HTTPException(status_code=400, detail="asset_id is required")
+
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await get_loss_status(tb, asset_id)
+
+    return result
 
 
 @router.get("/metrics")

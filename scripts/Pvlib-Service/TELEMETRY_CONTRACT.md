@@ -154,6 +154,45 @@ The `pvlib_*` ops aliases (`active_power_pvlib_kw`, `pvlib_daily_energy_kwh`) ma
 | Loss Attribution widget | `Widgets/Grid & Losses/Loss Attribution` | Datasource-agnostic — wire the TB datasource key to `potential_power` (instantaneous) or `total_generation_expected_kwh` (daily energy mode). No code change required. |
 | Forecast vs Actual Energy | `Widgets/Forecasts & Risk/Forecast vs Actual Energy` | Gap 8: fetches `total_generation_expected_kwh` as Dataset 5 (green dotted "Physics Expected" line). Setting: **pvlibExpectedKey** (default `total_generation_expected_kwh`). kWh auto-converted to MWh for display. |
 | Portfolio Status Map | `Widgets/Portfolio/Portfolio Site Status Map` | Uses `isPlant`/`isPlantAgg` attributes for hierarchy — no telemetry keys, unaffected. |
+
+---
+
+## Loss Attribution Daily Keys (Phase L0 — added 2026-05-04)
+
+Written once per calendar day at **local midnight** (ts = Unix-ms of 00:00:00 local) by `app/services/loss_rollup_job.py`. Sentinel = `-1` when data is invalid (< 360 samples, missing potential, etc.). All keys are also rolled up to `isPlantAgg` ancestor assets.
+
+| Key | Type | Unit | Cadence | Description | Widget use |
+|---|---|---|---|---|---|
+| `loss_grid_daily_kwh` | timeseries | kWh | daily, ts = local midnight | `Σ max(potential − active, 0) × (1/60)` over the calendar day. Sentinel `-1`. | Loss Attribution `grid` mode |
+| `loss_curtail_daily_kwh` | timeseries | kWh | daily | `Σ max(potential − max(ceiling, active), 0) × (1/60)` when `setpoint_pct < 99.5`. Sentinel `-1`. | `curtail` mode |
+| `loss_revenue_daily_lkr` | timeseries | LKR | daily | `loss_grid_daily_kwh × tariff_rate_lkr` using tariff at compute time. `-1` if tariff missing. | `revenue` mode |
+| `loss_curtail_revenue_daily_lkr` | timeseries | LKR | daily | `loss_curtail_daily_kwh × tariff_rate_lkr`. `-1` if tariff missing. | `curtailRevenue` mode |
+| `potential_energy_daily_kwh` | timeseries | kWh | daily | `Σ potential × (1/60)`. Denominator for loss rate / delta footer. | All modes (delta) |
+| `exported_energy_daily_kwh` | timeseries | kWh | daily | `Σ active × (1/60)` (after W→kW unit scaling). | Delta + diagnostics |
+| `loss_data_source` | timeseries | string | daily | `"ok"` / `"error:insufficient_samples"` / `"error:no_potential"` / `"error:no_actual"` / `"warn:no_tariff"` / `"rollup"` | Diagnostics |
+| `loss_model_version` | timeseries | string | daily | `"loss-rollup-v1"` | Regression detection |
+
+**Deprecation policy**: same as other keys — 90-day window before removal.
+
+---
+
+## Loss Attribution Lifetime Attributes (Phase L0 — added 2026-05-04)
+
+Written to **SERVER_SCOPE** on each plant asset and rolled up to `isPlantAgg` ancestors. Updated daily by the loss-rollup cron; recomputable on demand via `POST /admin/recompute-lifetime`.
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `loss_grid_lifetime_kwh` | double | Cumulative gross loss kWh since `commissioning_date` |
+| `loss_curtail_lifetime_kwh` | double | Cumulative curtailment loss kWh |
+| `loss_revenue_lifetime_lkr` | double | Sum of historical daily LKR values (each computed at tariff in effect that day) |
+| `loss_curtail_revenue_lifetime_lkr` | double | Same for curtailment revenue loss |
+| `potential_energy_lifetime_kwh` | double | Cumulative potential energy kWh (denominator for loss-rate displays) |
+| `exported_energy_lifetime_kwh` | double | Cumulative exported energy kWh |
+| `loss_lifetime_anchor_date` | string | ISO date of the most recent day already included (e.g. `"2026-05-03"`) |
+| `loss_lifetime_updated_at` | string | ISO datetime of last successful attribute write |
+
+**Reading in widget**: `fetchAttributesWithFallback(entity, [attr_name])` — reads SERVER_SCOPE first, then SHARED_SCOPE. The widget uses the `lossLifetimeAttrPrefix` setting (default `"loss_"`) to compose the six attribute names.
+
 - A plant appearing under both parent A and parent B contributes its output to both parents independently (correct for independent regional totals).
 
 If you need a non-double-counted global total, sum `potential_power` across leaf plants only (not aggregation assets).
