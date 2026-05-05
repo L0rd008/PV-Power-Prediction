@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.job_manager import job_manager
-from app.services.scheduler import cycle_state, run_cycle_now, run_daily_now, run_loss_rollup_now
+from app.services.scheduler import cycle_state, run_cycle_now, run_daily_now, run_loss_rollup_now, run_today_partial_now
 
 router = APIRouter()
 
@@ -370,6 +370,21 @@ async def admin_run_loss_rollup(
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "results": results,
     }
+
+
+@router.post("/admin/run-today-partial")
+async def admin_run_today_partial():
+    """Manually trigger the intra-day today-partial loss roll-up.
+
+    Computes today-so-far daily loss keys for all pvlib-enabled plants and writes
+    them at today's local-midnight timestamp with ``loss_data_source = "ok:partial"``.
+    Lifetime attributes are NOT updated by this endpoint.
+
+    Requires both LOSS_ROLLUP_ENABLED=true and LOSS_TODAY_PARTIAL_ENABLED=true in .env,
+    otherwise returns ``{"status": "disabled"}``.  Outside the configured daylight window
+    returns ``{"status": "outside_window"}``.
+    """
+    return await run_today_partial_now()
 
 
 @router.post("/admin/recompute-lifetime")

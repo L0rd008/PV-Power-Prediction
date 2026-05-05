@@ -51,6 +51,7 @@ from app.services.loss_rollup_job import (
     _sum_daily_values,
     _lifetime_increment_step,
     run_loss_rollup,
+    run_today_partial_rollup,
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -180,14 +181,14 @@ class TestIntegrationMath:
 
         result = _integrate(pot, act, sp, 1000.0, start, end)
 
-        # 1 440 minutes × (20 kW / 60) = 480 kWh
-        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(480.0, rel=1e-3)
+        # 840 minutes (14 hours) * (20 kW / 60) = 280 kWh
+        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(280.0, rel=1e-3)
         # No setpoint → no curtailment
         assert result[KEY_LOSS_CURTAIL_DAILY] == pytest.approx(0.0, abs=1e-3)
-        # Potential: 1 440 × (100/60) = 2 400 kWh
-        assert result[KEY_POTENTIAL_DAILY] == pytest.approx(2400.0, rel=1e-3)
-        # Exported: 1 440 × (80/60) = 1 920 kWh
-        assert result[KEY_EXPORTED_DAILY] == pytest.approx(1920.0, rel=1e-3)
+        # Potential: 840 * (100/60) = 1400 kWh
+        assert result[KEY_POTENTIAL_DAILY] == pytest.approx(1400.0, rel=1e-3)
+        # Exported: 840 * (80/60) = 1120 kWh
+        assert result[KEY_EXPORTED_DAILY] == pytest.approx(1120.0, rel=1e-3)
 
     def test_negative_potential_skipped(self):
         """Negative potential records (sentinels) should be excluded from integration."""
@@ -331,7 +332,7 @@ class TestWToKwScaling:
 
         result = _integrate(pot, act_kw, sp, 1000.0, start, end)
 
-        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(480.0, rel=1e-3)
+        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(280.0, rel=1e-3)
 
     def test_no_scaling_when_unit_is_kw(self):
         """If active_power_unit=kW (default), no scaling → same as direct integration."""
@@ -343,7 +344,7 @@ class TestWToKwScaling:
 
         result = _integrate(pot, act, sp, 1000.0, start, end)
 
-        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(480.0, rel=1e-3)
+        assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(280.0, rel=1e-3)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -612,3 +613,121 @@ class TestRunLossRollupSummary:
         # post_telemetry should NOT have been called for a skipped plant
         # (it may be called for ancestor rollup but ancestor_map is empty in this mock)
         # Just verify no per-plant telemetry was written
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. run_today_partial_rollup() — today-partial cron
+# ════════════════════════════════════════════════════════════════════════════
+
+_PARTIAL_MOCK_SETTINGS_VALS = {
+    "TZ_LOCAL": "UTC",
+    "root_asset_ids": ["root-001"],
+    "MAX_CONCURRENT_PLANTS": 5,
+    "LOSS_MIN_VALID_SAMPLES": 360,
+    "LOSS_TODAY_PARTIAL_MIN_SAMPLES": 30,
+    "LOSS_DEFAULT_SETPOINT_KEYS": "setpoint_active_power",
+    "LOSS_LIFETIME_PAGE_DAYS": 90,
+}
+
+
+def _apply_partial_settings(mock_settings):
+    for k, v in _PARTIAL_MOCK_SETTINGS_VALS.items():
+        setattr(mock_settings, k, v)
+
+
+class TestTodayPartialRollup:
+
+    @pytest.mark.asyncio
+    async def test_partial_returns_partial_flag_and_date(self):
+        """run_today_partial_rollup returns partial=True and today's date."""
+        day_start = _utc(0, 0, 3)
+        day_end   = _utc(6, 0, 3)
+        records = _make_records(day_start, day_end, 100.0)
+        tb = _make_tb_client(potential_records=records, actual_records=records)
+
+        with patch("app.services.loss_rollup_job.settings") as mock_settings:
+            _apply_partial_settings(mock_settings)
+            result = await run_today_partial_rollup(tb)
+
+        assert result.get("partial") is True
+        assert "date" in result
+
+    @pytest.mark.asyncio
+    async def test_partial_does_not_update_lifetime_attributes(self):
+        """run_today_partial_rollup must NOT call post_attributes (no lifetime update)."""
+        day_start = _utc(0, 0, 3)
+        day_end   = _utc(6, 0, 3)
+        records = _make_records(day_start, day_end, 100.0)
+        tb = _make_tb_client(potential_records=records, actual_records=records)
+
+        with patch("app.services.loss_rollup_job.settings") as mock_settings:
+            _apply_partial_settings(mock_settings)
+            await run_today_partial_rollup(tb)
+
+        tb.post_attributes.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_partial_insufficient_samples_writes_sentinel(self):
+        """If fewer than LOSS_TODAY_PARTIAL_MIN_SAMPLES exist, daily keys are -1."""
+        day_start = _utc(0, 0, 3)
+        # Only 10 records — below LOSS_TODAY_PARTIAL_MIN_SAMPLES = 30
+        tiny_records = _make_records(day_start, _utc(0, 10, 3), 100.0)
+        tb = _make_tb_client(potential_records=tiny_records, actual_records=tiny_records)
+
+        with patch("app.services.loss_rollup_job.settings") as mock_settings:
+            _apply_partial_settings(mock_settings)
+            result = await run_today_partial_rollup(tb)
+
+        # Should have failed (insufficient samples)
+        assert result["plants_ok"] == 0
+
+        written = tb.post_telemetry.call_args
+        if written:
+            values = written[0][2][0]["values"]
+            assert values[KEY_LOSS_GRID_DAILY] == -1
+
+    @pytest.mark.asyncio
+    async def test_partial_ok_writes_ok_partial_data_source(self):
+        """Successful partial run stamps loss_data_source = 'ok:partial'."""
+        from app.services.loss_rollup_job import KEY_LOSS_DATA_SOURCE
+        day_start = _utc(0, 0, 3)
+        day_end   = _utc(8, 0, 3)  # 8 h of data — well above 30 min threshold
+        records = _make_records(day_start, day_end, 100.0)
+        tb = _make_tb_client(potential_records=records, actual_records=records)
+
+        with patch("app.services.loss_rollup_job.settings") as mock_settings:
+            _apply_partial_settings(mock_settings)
+            result = await run_today_partial_rollup(tb)
+
+        assert result["plants_ok"] == 1
+
+        # The re-stamp write should carry "ok:partial"
+        calls = tb.post_telemetry.call_args_list
+        data_sources = [
+            c[0][2][0]["values"].get(KEY_LOSS_DATA_SOURCE)
+            for c in calls
+            if c[0][2] and c[0][2][0].get("values")
+        ]
+        assert "ok:partial" in data_sources, (
+            f"Expected 'ok:partial' in data sources; got {data_sources}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_skipped_plant_excluded(self):
+        """Plant with loss_attribution_enabled=false is skipped; plants_skipped=1."""
+        day_start = _utc(0, 0, 3)
+        day_end   = _utc(8, 0, 3)
+        records = _make_records(day_start, day_end, 100.0)
+        tb = _make_tb_client(potential_records=records, actual_records=records)
+        tb.get_asset_attributes = AsyncMock(return_value={
+            "isPlant": "true",
+            "pvlib_enabled": "true",
+            "loss_attribution_enabled": "false",
+        })
+
+        with patch("app.services.loss_rollup_job.settings") as mock_settings:
+            _apply_partial_settings(mock_settings)
+            result = await run_today_partial_rollup(tb)
+
+        assert result["plants_skipped"] == 1
+        assert result["plants_ok"] == 0

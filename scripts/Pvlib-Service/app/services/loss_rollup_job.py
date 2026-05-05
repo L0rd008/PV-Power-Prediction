@@ -48,10 +48,15 @@ KEY_LOSS_GRID_DAILY       = "loss_grid_daily_kwh"
 KEY_LOSS_CURTAIL_DAILY    = "loss_curtail_daily_kwh"
 KEY_LOSS_REVENUE_DAILY    = "loss_revenue_daily_lkr"
 KEY_LOSS_CURTAILREV_DAILY = "loss_curtail_revenue_daily_lkr"
+KEY_LOSS_TARIFF_DAILY     = "loss_tariff_rate_lkr_at_compute"
 KEY_POTENTIAL_DAILY       = "potential_energy_daily_kwh"
 KEY_EXPORTED_DAILY        = "exported_energy_daily_kwh"
 KEY_LOSS_DATA_SOURCE      = "loss_data_source"
 KEY_LOSS_MODEL_VERSION    = "loss_model_version"
+
+# RETIRED (round-1 deviation — never consumed by any widget):
+#   potential_energy_monthly_kwh  — removed 2026-05-04
+#   potential_energy_yearly_kwh   — removed 2026-05-04
 
 # ── Lifetime attribute names (SERVER_SCOPE) ──────────────────────────────────
 
@@ -74,6 +79,12 @@ LIFETIME_ATTRS = [
 ]
 
 LOSS_MODEL_VERSION = "loss-rollup-v1"
+
+
+async def _empty_dict() -> dict:
+    """Async no-op that returns an empty dict; used in asyncio.gather calls."""
+    return {}
+
 
 # Mirror of forecast_service.KEY_POTENTIAL_POWER — defined here to avoid importing
 # forecast_service (which drags in pvlib) from this module.  The value is a contract
@@ -164,7 +175,8 @@ async def run_loss_rollup(
             stats["failed"] += 1
 
         per_plant[plant.id] = result
-        plant_daily[plant.id] = result.get("daily_values", _sentinel_daily_values())
+        daily_vals = result.get("daily_values", _sentinel_daily_values())
+        plant_daily[plant.id] = daily_vals
 
     # ── Ancestor roll-up of daily keys ──────────────────────────────────────
     ancestor_children: Dict[str, Set[str]] = {}
@@ -172,15 +184,12 @@ async def run_loss_rollup(
         for anc_id in ancestors:
             ancestor_children.setdefault(anc_id, set()).add(plant_id)
 
-    ancestor_daily: Dict[str, Dict[str, float]] = {}
-
     for ancestor_id, child_ids in ancestor_children.items():
         summed = _sum_daily_values([
             plant_daily[cid]
             for cid in child_ids
             if cid in plant_daily
         ])
-        ancestor_daily[ancestor_id] = summed
         await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, summed, "rollup")
 
     # ── Lifetime update: plants ──────────────────────────────────────────────
@@ -224,6 +233,99 @@ async def run_loss_rollup(
     }
 
 
+# ── Today-partial roll-up (5-min cadence, daylight hours only) ───────────────
+
+async def run_today_partial_rollup(tb_client) -> Dict[str, object]:
+    """Recompute today-so-far daily keys for every pvlib-enabled plant.
+
+    Writes the same six daily keys at today's local-midnight ts, overwriting any
+    prior partial.  Does NOT update lifetime attributes — those are advanced only
+    by the 00:10 cron when the day is finalised.
+
+    Data source value: ``"ok:partial"`` for plant rows; ``"rollup:partial"`` for
+    ancestor roll-ups.  Downstream reports can filter on this flag.
+    """
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    now_local = datetime.now(tz)
+    day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+    end_utc = now_local.astimezone(timezone.utc)
+    day_ts_ms = int(day_start_local.timestamp() * 1000)
+
+    log.info(
+        "run_today_partial_rollup: computing today-so-far %s → %s (local: %s)",
+        day_start_utc.isoformat(), end_utc.isoformat(), day_start_local.date(),
+    )
+
+    plants, ancestor_map = await tb_client.discover_plants(settings.root_asset_ids)
+    if not plants:
+        log.warning("run_today_partial_rollup: no pvlib-enabled plants found")
+        return {"plants_ok": 0, "plants_failed": 0, "plants_skipped": 0,
+                "date": str(day_start_local.date()), "partial": True}
+
+    sem = asyncio.Semaphore(settings.MAX_CONCURRENT_PLANTS)
+    min_samples = settings.LOSS_TODAY_PARTIAL_MIN_SAMPLES
+
+    async def _process(plant):
+        async with sem:
+            return await _process_plant(
+                tb_client, plant.id, day_start_utc, end_utc,
+                day_ts_ms, day_start_local,
+                min_samples_override=min_samples,
+            )
+
+    results = await asyncio.gather(*(_process(p) for p in plants), return_exceptions=True)
+
+    stats: Dict[str, int] = {"ok": 0, "failed": 0, "skipped": 0}
+    plant_daily: Dict[str, Dict[str, float]] = {}
+
+    for plant, result in zip(plants, results):
+        if isinstance(result, Exception):
+            log.error("run_today_partial_rollup: unhandled exception for %s: %s", plant.id, result)
+            stats["failed"] += 1
+            plant_daily[plant.id] = _sentinel_daily_values()
+            continue
+
+        if result.get("skipped"):
+            stats["skipped"] += 1
+        elif result.get("ok"):
+            stats["ok"] += 1
+            # Re-stamp data_source as "ok:partial" (or "warn:no_tariff") to distinguish
+            # these intra-day rows from the finalised daily values written at 00:10.
+            ds = result.get("data_source", "ok")
+            partial_ds = "warn:no_tariff" if ds == "warn:no_tariff" else "ok:partial"
+            await _safe_write_daily(
+                tb_client, plant.id, day_ts_ms,
+                result["daily_values"], partial_ds,
+            )
+        else:
+            stats["failed"] += 1
+        plant_daily[plant.id] = result.get("daily_values", _sentinel_daily_values())
+
+    # ── Ancestor roll-up (daily only — no lifetime) ──────────────────────────
+    ancestor_children: Dict[str, Set[str]] = {}
+    for plant_id, ancestors in ancestor_map.items():
+        for anc_id in ancestors:
+            ancestor_children.setdefault(anc_id, set()).add(plant_id)
+
+    for ancestor_id, child_ids in ancestor_children.items():
+        summed = _sum_daily_values([plant_daily[cid] for cid in child_ids if cid in plant_daily])
+        await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, summed, "rollup:partial")
+
+    log.info(
+        "run_today_partial_rollup: done — ok=%d failed=%d skipped=%d date=%s",
+        stats["ok"], stats["failed"], stats["skipped"], day_start_local.date(),
+    )
+
+    return {
+        "plants_ok": stats["ok"],
+        "plants_failed": stats["failed"],
+        "plants_skipped": stats["skipped"],
+        "date": str(day_start_local.date()),
+        "partial": True,
+    }
+
+
 # ── Single-plant processing ──────────────────────────────────────────────────
 
 async def _process_plant(
@@ -233,6 +335,7 @@ async def _process_plant(
     day_end_utc: datetime,
     day_ts_ms: int,
     day_start_local_date,  # datetime in local tz (for anchor date)
+    min_samples_override: Optional[int] = None,
 ) -> Dict[str, object]:
     """Compute and write one plant's daily loss keys.  Returns status dict."""
     try:
@@ -283,7 +386,7 @@ async def _process_plant(
             tb_client.get_timeseries(
                 "ASSET", plant_id, setpoint_keys,
                 start=setpoint_start_utc, end=day_end_utc, limit=100_000,
-            ) if setpoint_keys else asyncio.coroutine(lambda: {})(),
+            ) if setpoint_keys else _empty_dict(),
         )
     except Exception as exc:
         log.error("_process_plant: timeseries fetch failed for %s: %s", plant_id, exc)
@@ -320,7 +423,7 @@ async def _process_plant(
     if w_to_kw and len(actual_series) > 0:
         actual_series = actual_series * 0.001
 
-    min_samples = settings.LOSS_MIN_VALID_SAMPLES
+    min_samples = min_samples_override if min_samples_override is not None else settings.LOSS_MIN_VALID_SAMPLES
     if len(potential_series) < min_samples or len(actual_series) < min_samples:
         log.warning(
             "_process_plant: insufficient samples for %s "
@@ -354,10 +457,12 @@ async def _process_plant(
     if _is_positive_or_zero(tariff) and tariff is not None:
         daily[KEY_LOSS_REVENUE_DAILY]    = round(daily[KEY_LOSS_GRID_DAILY] * tariff, 2)
         daily[KEY_LOSS_CURTAILREV_DAILY] = round(daily[KEY_LOSS_CURTAIL_DAILY] * tariff, 2)
+        daily[KEY_LOSS_TARIFF_DAILY]     = float(tariff)
         data_source = "ok"
     else:
         daily[KEY_LOSS_REVENUE_DAILY]    = -1
         daily[KEY_LOSS_CURTAILREV_DAILY] = -1
+        daily[KEY_LOSS_TARIFF_DAILY]     = -1
         data_source = "warn:no_tariff"
         log.info("_process_plant: tariff missing for %s — LKR keys = -1", plant_id)
 
@@ -391,6 +496,10 @@ def _integrate(
     # 1-minute DatetimeIndex spanning the day
     idx = pd.date_range(day_start_utc, day_end_utc, freq="1min", inclusive="left", tz="UTC")
 
+    # Filter to solar window: 05:00 to 19:00 local time
+    idx_local = idx.tz_convert(settings.TZ_LOCAL)
+    idx_filtered = idx[(idx_local.hour >= 5) & (idx_local.hour < 19)]
+
     # Resample onto 1-min grid: mean within each minute bucket
     pot_1min = potential.resample("1min").mean().reindex(idx)
     act_1min = actual.resample("1min").mean().reindex(idx)
@@ -415,7 +524,7 @@ def _integrate(
     potential_energy_kwh = 0.0
     exported_energy_kwh = 0.0
 
-    for ts in idx:
+    for ts in idx_filtered:
         pot_v = pot_1min.get(ts, float("nan"))
         act_v = act_1min.get(ts, float("nan"))
         sp_v = float(sp_1min.get(ts, 100.0))
@@ -693,6 +802,7 @@ async def get_loss_status(tb_client, asset_id: str) -> Dict[str, object]:
         KEY_LOSS_CURTAIL_DAILY,
         KEY_LOSS_REVENUE_DAILY,
         KEY_LOSS_CURTAILREV_DAILY,
+        KEY_LOSS_TARIFF_DAILY,
         KEY_POTENTIAL_DAILY,
         KEY_EXPORTED_DAILY,
         KEY_LOSS_DATA_SOURCE,
@@ -768,6 +878,7 @@ async def _safe_write_daily(
         KEY_LOSS_CURTAIL_DAILY:    daily.get(KEY_LOSS_CURTAIL_DAILY, -1),
         KEY_LOSS_REVENUE_DAILY:    daily.get(KEY_LOSS_REVENUE_DAILY, -1),
         KEY_LOSS_CURTAILREV_DAILY: daily.get(KEY_LOSS_CURTAILREV_DAILY, -1),
+        KEY_LOSS_TARIFF_DAILY:     daily.get(KEY_LOSS_TARIFF_DAILY, -1),
         KEY_POTENTIAL_DAILY:       daily.get(KEY_POTENTIAL_DAILY, -1),
         KEY_EXPORTED_DAILY:        daily.get(KEY_EXPORTED_DAILY, -1),
         KEY_LOSS_DATA_SOURCE:      data_source,
@@ -780,7 +891,6 @@ async def _safe_write_daily(
         )
     except Exception as exc:
         log.error("_safe_write_daily: failed for %s: %s", entity_id, exc)
-
 
 async def _safe_post_attributes(tb_client, entity_id: str, payload: dict) -> None:
     """Write SERVER_SCOPE attributes; best-effort."""
@@ -858,6 +968,7 @@ def _sum_daily_values(values_list: List[Dict[str, float]]) -> Dict[str, float]:
         KEY_LOSS_CURTAIL_DAILY,
         KEY_LOSS_REVENUE_DAILY,
         KEY_LOSS_CURTAILREV_DAILY,
+        KEY_LOSS_TARIFF_DAILY,
         KEY_POTENTIAL_DAILY,
         KEY_EXPORTED_DAILY,
     ]
@@ -885,6 +996,7 @@ def _sentinel_daily_values() -> Dict[str, float]:
         KEY_LOSS_CURTAIL_DAILY:    -1.0,
         KEY_LOSS_REVENUE_DAILY:    -1.0,
         KEY_LOSS_CURTAILREV_DAILY: -1.0,
+        KEY_LOSS_TARIFF_DAILY:     -1.0,
         KEY_POTENTIAL_DAILY:       -1.0,
         KEY_EXPORTED_DAILY:        -1.0,
     }

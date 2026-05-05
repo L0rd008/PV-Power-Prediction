@@ -110,9 +110,18 @@ async def run_daily_rollup(
 
         if kwh == -1.0:
             val = {"pvlib_data_source": "error:integration_failed"}
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0)
+            await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0, -1.0, -1.0)
         else:
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh)
+            month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
+            year_start_utc = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
+            
+            monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            yearly_history = await _get_historical_sum(tb_client, plant.id, year_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            
+            monthly_kwh = monthly_history + kwh
+            yearly_kwh = yearly_history + kwh
+
+            await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh)
             stats["ok"] += 1
 
     # Ancestor roll-up
@@ -127,7 +136,15 @@ async def run_daily_rollup(
             if cid in plant_kwh and plant_kwh[cid] >= 0
         ]
         total_kwh = sum(valid_kwhs) if valid_kwhs else -1.0
-        await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, total_kwh)
+        
+        if total_kwh != -1.0:
+            month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
+            year_start_utc = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
+            monthly_history = await _get_historical_sum(tb_client, ancestor_id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            yearly_history = await _get_historical_sum(tb_client, ancestor_id, year_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, total_kwh, monthly_history + total_kwh, yearly_history + total_kwh)
+        else:
+            await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, -1.0, -1.0, -1.0)
 
     log.info("run_daily_rollup: done — ok=%d failed=%d skipped=%d",
              stats["ok"], stats["failed"], stats["skipped"])
@@ -166,6 +183,11 @@ async def _integrate_plant_day(
         if float(r["value"]) >= 0  # exclude -1 sentinels
     })
 
+    # Filter to 05:00-19:00 local time
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    series_local = series.index.tz_convert(tz)
+    series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
+
     if len(series) < MIN_VALID_SAMPLES:
         log.warning(
             "_integrate_plant_day: only %d valid samples for %s (min %d) — writing -1",
@@ -179,12 +201,14 @@ async def _integrate_plant_day(
 
 
 async def _safe_write_daily(
-    tb_client, entity_id: str, ts_ms: int, kwh: float
+    tb_client, entity_id: str, ts_ms: int, kwh: float, monthly_kwh: float = -1.0, yearly_kwh: float = -1.0
 ) -> None:
     """Write daily energy keys; best-effort (logs on failure)."""
     if kwh == -1.0:
         values = {
             KEY_DAILY_ENERGY_EXPECTED: -1,
+            "total_generation_expected_monthly_kwh": -1,
+            "total_generation_expected_yearly_kwh": -1,
             KEY_PVLIB_DAILY_ENERGY: -1,
             KEY_DATA_SOURCE: "error:insufficient_samples",
             KEY_MODEL_VERSION: MODEL_VERSION,
@@ -192,6 +216,8 @@ async def _safe_write_daily(
     else:
         values = {
             KEY_DAILY_ENERGY_EXPECTED: round(kwh, 3),
+            "total_generation_expected_monthly_kwh": round(monthly_kwh, 3) if monthly_kwh >= 0 else -1,
+            "total_generation_expected_yearly_kwh": round(yearly_kwh, 3) if yearly_kwh >= 0 else -1,
             KEY_PVLIB_DAILY_ENERGY: round(kwh, 3),
             KEY_MODEL_VERSION: MODEL_VERSION,
         }
@@ -199,3 +225,20 @@ async def _safe_write_daily(
         await tb_client.post_telemetry("ASSET", entity_id, [{"ts": ts_ms, "values": values}])
     except Exception as exc:
         log.error("_safe_write_daily: failed for %s: %s", entity_id, exc)
+
+async def _get_historical_sum(
+    tb_client, entity_id: str, start_utc: datetime, end_utc: datetime, key: str
+) -> float:
+    """Fetch historical daily values up to end_utc (exclusive) and return their sum."""
+    if start_utc >= end_utc:
+        return 0.0
+    try:
+        raw = await tb_client.get_timeseries(
+            "ASSET", entity_id, [key],
+            start=start_utc, end=end_utc, limit=1000
+        )
+        records = raw.get(key, [])
+        return sum(float(r["value"]) for r in records if float(r["value"]) >= 0)
+    except Exception as exc:
+        log.error("_get_historical_sum: failed for %s: %s", entity_id, exc)
+        return 0.0

@@ -159,6 +159,44 @@ async def run_loss_rollup_now(date: Optional[datetime] = None) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
+async def run_today_partial_now() -> dict:
+    """Trigger the today-partial loss roll-up immediately.
+
+    Gated on both LOSS_ROLLUP_ENABLED and LOSS_TODAY_PARTIAL_ENABLED.
+    Also honours the daylight-hours window (DAY_START_HOUR..DAY_END_HOUR).
+    """
+    if not settings.LOSS_ROLLUP_ENABLED or not settings.LOSS_TODAY_PARTIAL_ENABLED:
+        log.debug("run_today_partial_now: disabled — skipping")
+        return {"status": "disabled"}
+
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    h = datetime.now(tz).hour
+    if h < settings.LOSS_TODAY_PARTIAL_DAY_START_HOUR or h >= settings.LOSS_TODAY_PARTIAL_DAY_END_HOUR:
+        log.debug(
+            "run_today_partial_now: outside window (%02d:00–%02d:00), current hour=%d",
+            settings.LOSS_TODAY_PARTIAL_DAY_START_HOUR,
+            settings.LOSS_TODAY_PARTIAL_DAY_END_HOUR,
+            h,
+        )
+        return {"status": "outside_window", "hour": h}
+
+    from app.services.loss_rollup_job import run_today_partial_rollup
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    effective_client = _tb_client
+    try:
+        if effective_client is not None:
+            return await run_today_partial_rollup(effective_client)
+        else:
+            async with ThingsBoardClient(
+                settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+            ) as tb:
+                return await run_today_partial_rollup(tb)
+    except Exception as exc:
+        log.exception("run_today_partial_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 async def run_daily_now(date: Optional[datetime] = None) -> dict:
     """Trigger the daily roll-up job immediately (used by /admin/run-daily and the cron)."""
     from app.services.daily_job import run_daily_rollup
@@ -239,6 +277,27 @@ def start_scheduler(tb_client=None) -> None:
             replace_existing=True,
         )
         log.info("scheduler: loss rollup cron registered at 00:10 %s", settings.TZ_LOCAL)
+
+        if settings.LOSS_TODAY_PARTIAL_ENABLED:
+            scheduler.add_job(
+                run_today_partial_now,
+                trigger="interval",
+                minutes=settings.LOSS_TODAY_PARTIAL_INTERVAL_MIN,
+                misfire_grace_time=120,
+                max_instances=1,
+                id="pvlib_loss_today_partial",
+                replace_existing=True,
+                coalesce=True,
+            )
+            log.info(
+                "scheduler: today-partial cron registered every %d min %02d:00–%02d:00 %s",
+                settings.LOSS_TODAY_PARTIAL_INTERVAL_MIN,
+                settings.LOSS_TODAY_PARTIAL_DAY_START_HOUR,
+                settings.LOSS_TODAY_PARTIAL_DAY_END_HOUR,
+                settings.TZ_LOCAL,
+            )
+        else:
+            log.info("scheduler: today-partial cron NOT registered (LOSS_TODAY_PARTIAL_ENABLED=false)")
     else:
         log.info("scheduler: loss rollup cron NOT registered (LOSS_ROLLUP_ENABLED=false)")
 

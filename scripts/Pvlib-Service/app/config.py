@@ -103,6 +103,26 @@ class Settings(BaseSettings):
     """Page size in days when paging history during /admin/recompute-lifetime.
     Keeps individual TB timeseries reads under ~130 k rows per call."""
 
+    # Today-partial roll-up job (Phase L1+)
+    LOSS_TODAY_PARTIAL_ENABLED: bool = False
+    """Master flag for the intra-day today-partial cron.  Default false until Phase L1.
+    Requires LOSS_ROLLUP_ENABLED=true as well; no-op when either flag is false."""
+
+    LOSS_TODAY_PARTIAL_INTERVAL_MIN: int = 5
+    """Interval in minutes for the today-partial cron (default 5)."""
+
+    LOSS_TODAY_PARTIAL_DAY_START_HOUR: int = 5
+    """Local-tz hour at which the today-partial cron starts firing (default 05:00).
+    Sri Lanka fleet: sunrise ≈ 05:30."""
+
+    LOSS_TODAY_PARTIAL_DAY_END_HOUR: int = 19
+    """Local-tz hour at which the today-partial cron stops firing (default 19:00).
+    Sri Lanka fleet: sunset ≈ 18:30.  Outside this window the job is a no-op."""
+
+    LOSS_TODAY_PARTIAL_MIN_SAMPLES: int = 30
+    """Minimum 1-min samples required by the today-partial path (default 30 — half an hour).
+    Lower than the daily-job threshold (360) because we want partial values from mid-morning."""
+
     @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

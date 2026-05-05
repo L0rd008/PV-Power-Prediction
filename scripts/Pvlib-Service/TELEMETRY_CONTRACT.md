@@ -11,7 +11,9 @@
 | `potential_power` | timeseries | **kW** | Physics-model AC output from pvlib pipeline. Primary customer-facing key. | V5 Curtailment (dataset 0 alt), Loss Attribution datasource, any future overlay widget |
 | `active_power_pvlib_kw` | timeseries | **kW** | Same value — ops/diagnostic alias. Kept for internal dashboards and debugging. | Ops dashboards only |
 | `total_generation_expected_kwh` | timeseries | **kWh** | Daily expected energy (written once at 01:00 UTC for prior day). | Forecast vs Actual Energy widget |
-| `pvlib_daily_energy_kwh` | timeseries | **kWh** | Same value — ops alias for `total_generation_expected_kwh`. | Ops dashboards only |
+| `total_generation_expected_monthly_kwh` | timeseries | kWh | Monthly cumulative expected generation (sum from start of month to today). | Reporting |
+| `total_generation_expected_yearly_kwh` | timeseries | kWh | Yearly cumulative expected generation (sum from start of year to today). | Reporting |
+| `pvlib_daily_energy_kwh` | timeseries | kWh | Backwards-compatible alias for `total_generation_expected_kwh` (historical systems). | Legacy dashboards |
 | `pvlib_data_source` | timeseries | string | Tier used: `"tb_station"` / `"solcast"` / `"clearsky"` / `"rollup"` | Diagnostics |
 | `pvlib_model_version` | timeseries | string | Always `"pvlib-h-a3-v1"` | Diagnostics, regression detection |
 | `ops_expected_unit` | timeseries | string | Always `"kW"` — declares the unit of `potential_power` for widgets that co-plot meter data | Unit normalisation |
@@ -165,12 +167,22 @@ Written once per calendar day at **local midnight** (ts = Unix-ms of 00:00:00 lo
 |---|---|---|---|---|---|
 | `loss_grid_daily_kwh` | timeseries | kWh | daily, ts = local midnight | `Σ max(potential − active, 0) × (1/60)` over the calendar day. Sentinel `-1`. | Loss Attribution `grid` mode |
 | `loss_curtail_daily_kwh` | timeseries | kWh | daily | `Σ max(potential − max(ceiling, active), 0) × (1/60)` when `setpoint_pct < 99.5`. Sentinel `-1`. | `curtail` mode |
-| `loss_revenue_daily_lkr` | timeseries | LKR | daily | `loss_grid_daily_kwh × tariff_rate_lkr` using tariff at compute time. `-1` if tariff missing. | `revenue` mode |
-| `loss_curtail_revenue_daily_lkr` | timeseries | LKR | daily | `loss_curtail_daily_kwh × tariff_rate_lkr`. `-1` if tariff missing. | `curtailRevenue` mode |
-| `potential_energy_daily_kwh` | timeseries | kWh | daily | `Σ potential × (1/60)`. Denominator for loss rate / delta footer. | All modes (delta) |
+| `loss_revenue_daily_lkr` | timeseries | LKR | daily | `loss_grid_daily_kwh × tariff_rate_lkr` at compute time. `-1` if tariff missing. | `revenue` mode |
+| `loss_curtail_revenue_daily_lkr` | timeseries | LKR | daily | `loss_curtail_daily_kwh × tariff_rate_lkr`. | `curtailRevenue` mode |
+| `loss_tariff_rate_lkr_at_compute` | timeseries | LKR | daily | The exact `tariff_rate_lkr` attribute value that was used to compute the LKR losses on this day. | Auditing / History |
+| `potential_energy_daily_kwh` | timeseries | kWh | daily | Σ potential. Denominator for loss rate / delta footer. | All modes (delta) |
 | `exported_energy_daily_kwh` | timeseries | kWh | daily | `Σ active × (1/60)` (after W→kW unit scaling). | Delta + diagnostics |
-| `loss_data_source` | timeseries | string | daily | `"ok"` / `"error:insufficient_samples"` / `"error:no_potential"` / `"error:no_actual"` / `"warn:no_tariff"` / `"rollup"` | Diagnostics |
+| `loss_data_source` | timeseries | string | daily | `"ok"` / `"ok:partial"` / `"error:insufficient_samples"` / `"error:no_potential"` / `"error:no_actual"` / `"warn:no_tariff"` / `"rollup"` / `"rollup:partial"` | Diagnostics |
 | `loss_model_version` | timeseries | string | daily | `"loss-rollup-v1"` | Regression detection |
+
+**RETIRED keys (removed 2026-05-04 — never consumed by any widget; 90-day deprecation waived for keys that were never in production):**
+
+| Key | Removed | Reason |
+|---|---|---|
+| `potential_energy_monthly_kwh` | 2026-05-04 | Round-1 deviation from Plan §7 (H2 decision explicitly forbade monthly/yearly precomputed keys). Zero consumers. |
+| `potential_energy_yearly_kwh` | 2026-05-04 | Same as above. |
+
+**Today-partial cadence note**: The same six `loss_*_daily_*` keys may be re-written multiple times during the current day by the today-partial cron (default every 5 min, 05:00–19:00 local). These intra-day writes carry `loss_data_source = "ok:partial"` (plant rows) or `"rollup:partial"` (ancestor assets). The finalised value written by the 00:10 cron the next day carries `"ok"` or `"warn:no_tariff"` and is authoritative. Consumers that need only finalised daily totals can filter on `loss_data_source NOT IN ('ok:partial', 'rollup:partial')`.
 
 **Deprecation policy**: same as other keys — 90-day window before removal.
 
