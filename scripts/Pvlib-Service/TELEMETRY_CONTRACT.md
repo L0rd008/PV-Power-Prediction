@@ -172,7 +172,7 @@ Written once per calendar day at **local midnight** (ts = Unix-ms of 00:00:00 lo
 | `loss_tariff_rate_lkr_at_compute` | timeseries | LKR | daily | The exact `tariff_rate_lkr` attribute value that was used to compute the LKR losses on this day. | Auditing / History |
 | `potential_energy_daily_kwh` | timeseries | kWh | daily | Σ potential. Denominator for loss rate / delta footer. | All modes (delta) |
 | `exported_energy_daily_kwh` | timeseries | kWh | daily | `Σ active × (1/60)` (after W→kW unit scaling). | Delta + diagnostics |
-| `loss_data_source` | timeseries | string | daily | `"ok"` / `"ok:partial"` / `"error:insufficient_samples"` / `"error:no_potential"` / `"error:no_actual"` / `"warn:no_tariff"` / `"rollup"` / `"rollup:partial"` | Diagnostics |
+| `loss_data_source` | timeseries | string | daily | `"ok"` / `"ok:partial"` / `"error:insufficient_samples"` / `"error:no_potential"` / `"error:no_actual"` / `"warn:no_tariff"` / `"warn:no_tariff:partial"` / `"rollup"` / `"rollup:partial"` | Diagnostics |
 | `loss_model_version` | timeseries | string | daily | `"loss-rollup-v1"` | Regression detection |
 
 **RETIRED keys (removed 2026-05-04 — never consumed by any widget; 90-day deprecation waived for keys that were never in production):**
@@ -182,7 +182,7 @@ Written once per calendar day at **local midnight** (ts = Unix-ms of 00:00:00 lo
 | `potential_energy_monthly_kwh` | 2026-05-04 | Round-1 deviation from Plan §7 (H2 decision explicitly forbade monthly/yearly precomputed keys). Zero consumers. |
 | `potential_energy_yearly_kwh` | 2026-05-04 | Same as above. |
 
-**Today-partial cadence note**: The same six `loss_*_daily_*` keys may be re-written multiple times during the current day by the today-partial cron (default every 5 min, 05:00–19:00 local). These intra-day writes carry `loss_data_source = "ok:partial"` (plant rows) or `"rollup:partial"` (ancestor assets). The finalised value written by the 00:10 cron the next day carries `"ok"` or `"warn:no_tariff"` and is authoritative. Consumers that need only finalised daily totals can filter on `loss_data_source NOT IN ('ok:partial', 'rollup:partial')`.
+**Today-partial cadence note**: The same daily keys may be re-written multiple times during the current day by the today-partial cron (default every 5 min, 05:00–19:00 local). These intra-day writes carry `loss_data_source = "ok:partial"` / `"warn:no_tariff:partial"` (plant rows) or `"rollup:partial"` (ancestor assets). The finalised value written by the 00:10 cron the next day carries `"ok"` or `"warn:no_tariff"` and is authoritative. Consumers that need only finalised daily totals can filter on `loss_data_source NOT IN ('ok:partial', 'warn:no_tariff:partial', 'rollup:partial')`.
 
 **Deprecation policy**: same as other keys — 90-day window before removal.
 

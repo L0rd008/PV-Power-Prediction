@@ -11,7 +11,7 @@ Algorithm per plant:
   2. Normalise active_power W→kW via per-plant active_power_unit attribute.
   3. Drop records with value < 0 (sentinels).
   4. If valid samples < LOSS_MIN_VALID_SAMPLES → write -1 sentinels for the day.
-  5. Resample / align to 1-min grid; step-hold setpoint to each minute.
+  5. Resample / align to 1-min calendar-day grid; step-hold setpoint to each minute.
   6. Integrate:
        gross_loss_kWh   = Σ max(potential − active, 0) × (1/60)
        curtail_loss_kWh = Σ max(potential − max(ceiling, active), 0) × (1/60)
@@ -19,7 +19,7 @@ Algorithm per plant:
        potential_energy_kWh = Σ potential × (1/60)
        exported_energy_kWh  = Σ active   × (1/60)
   7. Revenue = loss_kWh × tariff_rate_lkr  (using tariff at compute time).
-  8. Write six daily timeseries keys + 2 metadata strings at day local-midnight ts.
+  8. Write daily timeseries keys + metadata strings at day local-midnight ts.
   9. Update lifetime cumulative attributes (increment or recompute).
  10. Roll up daily values + lifetime attributes to all isPlantAgg ancestors.
 
@@ -166,6 +166,10 @@ async def run_loss_rollup(
         if isinstance(result, Exception):
             log.error("run_loss_rollup: unhandled exception for %s: %s", plant.id, result)
             result = _make_sentinel_result("error:unhandled_exception")
+            await _safe_write_daily(
+                tb_client, plant.id, day_ts_ms,
+                result["daily_values"], "error:unhandled_exception",
+            )
             stats["failed"] += 1
         elif result.get("skipped"):
             stats["skipped"] += 1
@@ -242,8 +246,9 @@ async def run_today_partial_rollup(tb_client) -> Dict[str, object]:
     prior partial.  Does NOT update lifetime attributes — those are advanced only
     by the 00:10 cron when the day is finalised.
 
-    Data source value: ``"ok:partial"`` for plant rows; ``"rollup:partial"`` for
-    ancestor roll-ups.  Downstream reports can filter on this flag.
+    Data source value: ``"ok:partial"`` or ``"warn:no_tariff:partial"`` for
+    plant rows; ``"rollup:partial"`` for ancestor roll-ups.  Downstream reports
+    can filter on this flag.
     """
     tz = ZoneInfo(settings.TZ_LOCAL)
     now_local = datetime.now(tz)
@@ -272,6 +277,7 @@ async def run_today_partial_rollup(tb_client) -> Dict[str, object]:
                 tb_client, plant.id, day_start_utc, end_utc,
                 day_ts_ms, day_start_local,
                 min_samples_override=min_samples,
+                write_daily=False,
             )
 
     results = await asyncio.gather(*(_process(p) for p in plants), return_exceptions=True)
@@ -282,25 +288,23 @@ async def run_today_partial_rollup(tb_client) -> Dict[str, object]:
     for plant, result in zip(plants, results):
         if isinstance(result, Exception):
             log.error("run_today_partial_rollup: unhandled exception for %s: %s", plant.id, result)
-            stats["failed"] += 1
-            plant_daily[plant.id] = _sentinel_daily_values()
-            continue
+            result = _make_sentinel_result("error:unhandled_exception")
 
         if result.get("skipped"):
             stats["skipped"] += 1
         elif result.get("ok"):
             stats["ok"] += 1
-            # Re-stamp data_source as "ok:partial" (or "warn:no_tariff") to distinguish
-            # these intra-day rows from the finalised daily values written at 00:10.
-            ds = result.get("data_source", "ok")
-            partial_ds = "warn:no_tariff" if ds == "warn:no_tariff" else "ok:partial"
-            await _safe_write_daily(
-                tb_client, plant.id, day_ts_ms,
-                result["daily_values"], partial_ds,
-            )
         else:
             stats["failed"] += 1
-        plant_daily[plant.id] = result.get("daily_values", _sentinel_daily_values())
+
+        daily_values = result.get("daily_values", _sentinel_daily_values())
+        plant_daily[plant.id] = daily_values
+
+        if not result.get("skipped"):
+            await _safe_write_daily(
+                tb_client, plant.id, day_ts_ms,
+                daily_values, _partial_data_source(str(result.get("data_source") or "error:unknown")),
+            )
 
     # ── Ancestor roll-up (daily only — no lifetime) ──────────────────────────
     ancestor_children: Dict[str, Set[str]] = {}
@@ -336,8 +340,13 @@ async def _process_plant(
     day_ts_ms: int,
     day_start_local_date,  # datetime in local tz (for anchor date)
     min_samples_override: Optional[int] = None,
+    write_daily: bool = True,
 ) -> Dict[str, object]:
     """Compute and write one plant's daily loss keys.  Returns status dict."""
+    async def _write(daily_values: Dict[str, float], data_source: str) -> None:
+        if write_daily:
+            await _safe_write_daily(tb_client, plant_id, day_ts_ms, daily_values, data_source)
+
     try:
         attrs = await tb_client.get_asset_attributes(plant_id)
     except Exception as exc:
@@ -390,10 +399,7 @@ async def _process_plant(
         )
     except Exception as exc:
         log.error("_process_plant: timeseries fetch failed for %s: %s", plant_id, exc)
-        await _safe_write_daily(
-            tb_client, plant_id, day_ts_ms,
-            _sentinel_daily_values(), "error:fetch_failed",
-        )
+        await _write(_sentinel_daily_values(), "error:fetch_failed")
         return _make_sentinel_result("error:fetch_failed")
 
     # ── Parse and validate series ────────────────────────────────────────────
@@ -402,18 +408,12 @@ async def _process_plant(
 
     if not potential_records:
         log.info("_process_plant: no potential_power for %s — writing -1", plant_id)
-        await _safe_write_daily(
-            tb_client, plant_id, day_ts_ms,
-            _sentinel_daily_values(), "error:no_potential",
-        )
+        await _write(_sentinel_daily_values(), "error:no_potential")
         return _make_sentinel_result("error:no_potential")
 
     if not actual_records:
         log.info("_process_plant: no actual_power for %s — writing -1", plant_id)
-        await _safe_write_daily(
-            tb_client, plant_id, day_ts_ms,
-            _sentinel_daily_values(), "error:no_actual",
-        )
+        await _write(_sentinel_daily_values(), "error:no_actual")
         return _make_sentinel_result("error:no_actual")
 
     # Build pandas Series, drop sentinels (< 0)
@@ -430,10 +430,7 @@ async def _process_plant(
             "(potential=%d, actual=%d, min=%d) — writing -1",
             plant_id, len(potential_series), len(actual_series), min_samples,
         )
-        await _safe_write_daily(
-            tb_client, plant_id, day_ts_ms,
-            _sentinel_daily_values(), "error:insufficient_samples",
-        )
+        await _write(_sentinel_daily_values(), "error:insufficient_samples")
         return _make_sentinel_result("error:insufficient_samples")
 
     # ── Build setpoint step-hold series ─────────────────────────────────────
@@ -447,10 +444,7 @@ async def _process_plant(
         )
     except Exception as exc:
         log.error("_process_plant: integration failed for %s: %s", plant_id, exc)
-        await _safe_write_daily(
-            tb_client, plant_id, day_ts_ms,
-            _sentinel_daily_values(), "error:integration_failed",
-        )
+        await _write(_sentinel_daily_values(), "error:integration_failed")
         return _make_sentinel_result("error:integration_failed")
 
     # ── Revenue computation ──────────────────────────────────────────────────
@@ -467,7 +461,7 @@ async def _process_plant(
         log.info("_process_plant: tariff missing for %s — LKR keys = -1", plant_id)
 
     # ── Write daily keys ─────────────────────────────────────────────────────
-    await _safe_write_daily(tb_client, plant_id, day_ts_ms, daily, data_source)
+    await _write(daily, data_source)
 
     return {
         "ok": True,
@@ -496,10 +490,6 @@ def _integrate(
     # 1-minute DatetimeIndex spanning the day
     idx = pd.date_range(day_start_utc, day_end_utc, freq="1min", inclusive="left", tz="UTC")
 
-    # Filter to solar window: 05:00 to 19:00 local time
-    idx_local = idx.tz_convert(settings.TZ_LOCAL)
-    idx_filtered = idx[(idx_local.hour >= 5) & (idx_local.hour < 19)]
-
     # Resample onto 1-min grid: mean within each minute bucket
     pot_1min = potential.resample("1min").mean().reindex(idx)
     act_1min = actual.resample("1min").mean().reindex(idx)
@@ -524,7 +514,7 @@ def _integrate(
     potential_energy_kwh = 0.0
     exported_energy_kwh = 0.0
 
-    for ts in idx_filtered:
+    for ts in idx:
         pot_v = pot_1min.get(ts, float("nan"))
         act_v = act_1min.get(ts, float("nan"))
         sp_v = float(sp_1min.get(ts, 100.0))
@@ -1004,6 +994,15 @@ def _sentinel_daily_values() -> Dict[str, float]:
 
 def _make_sentinel_result(data_source: str) -> Dict[str, object]:
     return {"ok": False, "daily_values": _sentinel_daily_values(), "data_source": data_source}
+
+
+def _partial_data_source(data_source: str) -> str:
+    """Map final daily data-source labels to intra-day partial labels."""
+    if data_source == "ok":
+        return "ok:partial"
+    if data_source == "warn:no_tariff":
+        return "warn:no_tariff:partial"
+    return data_source
 
 
 def _all_sentinel(daily: Dict[str, float]) -> bool:
