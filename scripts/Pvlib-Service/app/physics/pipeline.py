@@ -113,7 +113,9 @@ def compute_ac_power(
 
     for orient in config.orientations:
         # ── Step 1: POA irradiance ────────────────────────────────────────
-        use_poa = orient.use_measured_poa and poa_measured.notna().any()
+        # Auto-fallback to POA if GHI is entirely missing/zero but POA exists.
+        has_ghi = ghi.notna().any() and (ghi > 0).any()
+        use_poa = (orient.use_measured_poa or not has_ghi) and poa_measured.notna().any()
 
         if use_poa:
             poa_global = poa_measured.fillna(0.0)
@@ -121,12 +123,14 @@ def compute_ac_power(
             aoi = pd.Series(0.0, index=idx)  # assume normal incidence
             log.debug("orientation %s: using measured POA", orient.name)
         else:
+            dni_extra = pvlib.irradiance.get_extra_radiation(idx)
             poa_irrad = pvlib.irradiance.get_total_irradiance(
                 surface_tilt=orient.tilt,
                 surface_azimuth=orient.azimuth + 180,  # pvlib: 180=South
                 dni=_dni_from_ghi(ghi, solpos),
                 ghi=ghi,
                 dhi=_dhi_from_ghi(ghi, solpos),
+                dni_extra=dni_extra,
                 solar_zenith=solpos["apparent_zenith"],
                 solar_azimuth=solpos["azimuth"],
                 albedo=config.albedo,
