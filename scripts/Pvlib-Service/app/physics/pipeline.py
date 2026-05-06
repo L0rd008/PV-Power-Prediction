@@ -204,11 +204,9 @@ def compute_ac_power(
     pac_kw = pac_kw * (1.0 - config.ac_wiring)
 
     # Zero out night-time (Gap 25: use effective irradiance so POA-only stations work correctly)
-    # For POA-only stations, ghi is zero but poa_global is the real signal.
-    # Use the effective irradiance that was actually computed in the orientation loop.
-    # poa_global is the last orientation's value; for a single-orientation plant this is correct.
-    # For multi-orientation plants, any orientation with POA > 1 W/m² should prevent zeroing.
-    effective_irr = poa_measured.fillna(0.0) if poa_measured.notna().any() else ghi
+    # If either GHI or POA detects sunlight (> 1 W/m²), do not zero out the power.
+    # This protects against a disconnected/stuck POA sensor (0.0) overriding a valid GHI reading.
+    effective_irr = pd.concat([ghi, poa_measured.fillna(0.0)], axis=1).max(axis=1)
     night_mask = effective_irr.fillna(0.0) <= 1.0   # sub-threshold (accounts for sensor noise)
     pac_kw[night_mask] = 0.0
 
