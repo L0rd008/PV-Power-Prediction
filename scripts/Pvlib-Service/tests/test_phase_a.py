@@ -294,10 +294,16 @@ class TestSentinelRecords:
         """After a successful write, any missing 1-min boundaries get gap sentinels."""
         from app.services.forecast_service import ForecastService
 
-        # df_result covers only minute 0 — minutes 1,2,3 are missing
+        # df_result covers minute 0 and minute 4 — minutes 1,2,3 are missing
         start = _utc(0)
         end = _utc(3)
-        df_partial = _make_df(minutes=1)  # only minute 0
+        idx = pd.DatetimeIndex([_utc(0), _utc(4)])
+        df_partial = pd.DataFrame({
+            "potential_power_kw": [100.0, 100.0],
+            "active_power_pvlib_kw": [100.0, 100.0],
+            "data_source": ["tb_station"] * 2,
+            "model_version": ["pvlib-h-a3-v1"] * 2,
+        }, index=idx)
 
         mock_tb = AsyncMock()
         svc = ForecastService(mock_tb)
