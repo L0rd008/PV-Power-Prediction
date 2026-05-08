@@ -65,3 +65,7 @@ scripts/Pvlib-Service/**/__pycache__/
 
 # Large local datasets not suitable for normal git objects
 data/js_calibration_data.csv
+
+# Local Pvlib incident diagnostics / ThingsBoard dumps
+scripts/Pvlib-Service/ssk.txt
+scripts/Pvlib-Service/ssk_timeseries.csv

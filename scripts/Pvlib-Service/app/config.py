@@ -81,6 +81,17 @@ class Settings(BaseSettings):
         """Parse comma-separated eval plant IDs into a list of stripped strings."""
         return [x.strip() for x in self.EVAL_PLANT_IDS.split(",") if x.strip()]
 
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def _parse_debug_flag(cls, value):
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production", "false", "0", "no", "off"}:
+                return False
+            if normalized in {"debug", "dev", "development", "true", "1", "yes", "on"}:
+                return True
+        return value
+
     @property
     def root_asset_ids(self) -> list[str]:
         """Parse comma-separated root asset IDs into a list of stripped strings."""
