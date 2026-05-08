@@ -127,6 +127,47 @@ class TestConfigParsers:
         )
         assert config.p341_device_id == "p341-uuid-flat-2222"
 
+    def test_poa_only_station_and_top_level_poa_flag(self):
+        """Same GHI/POA key becomes POA-only; legacy top-level POA flag is honored."""
+        from app.physics.config import PlantConfig
+
+        attrs = {
+            "latitude": 7.5,
+            "longitude": 81.7,
+            "timezone": "Asia/Colombo",
+            "station": json.dumps({
+                "ghi_key": "wstn1_tilted_irradiance",
+                "poa_key": "wstn1_tilted_irradiance",
+                "air_temp_key": "wstn1_temperature_ambient",
+            }),
+            "orientations": json.dumps([
+                {"name": "Main", "tilt": 0, "azimuth": 0,
+                 "module_count": 22040, "use_measured_poa": False}
+            ]),
+            "use_measured_poa": True,
+        }
+
+        config = PlantConfig.from_tb_attributes("ssk-asset", attrs)
+
+        assert config.station.ghi_key is None
+        assert config.station.poa_key == "wstn1_tilted_irradiance"
+        assert config.orientations[0].use_measured_poa is True
+
+    def test_capacity_unit_mw_converted_to_kwp(self):
+        """Capacity with capacityUnit=MW is stored internally as kWp."""
+        from app.physics.config import PlantConfig
+
+        attrs = {
+            "latitude": 7.5,
+            "longitude": 81.7,
+            "Capacity": "10",
+            "capacityUnit": "MW",
+        }
+
+        config = PlantConfig.from_tb_attributes("mw-asset", attrs)
+
+        assert config.capacity_kwp == pytest.approx(10000.0)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # 3.  H1-B naming-prefix fallback (Gap 1)
@@ -319,6 +360,28 @@ class TestSentinelRecords:
         )
         for r in gap_records:
             assert r["values"]["potential_power"] == -1
+
+    @pytest.mark.asyncio
+    async def test_short_live_window_does_not_write_gap_sentinels(self):
+        """Short live windows should not turn normal sampling jitter into -1 writes."""
+        from app.services.forecast_service import ForecastService
+
+        start = datetime(2026, 4, 24, 12, 0, 10, tzinfo=timezone.utc)
+        end = datetime(2026, 4, 24, 12, 1, 40, tzinfo=timezone.utc)
+        idx = pd.DatetimeIndex([datetime(2026, 4, 24, 12, 0, 45, tzinfo=timezone.utc)])
+        df_partial = pd.DataFrame({
+            "potential_power_kw": [100.0],
+            "active_power_pvlib_kw": [100.0],
+            "data_source": ["tb_station"],
+            "model_version": ["pvlib-h-a3-v1"],
+        }, index=idx)
+
+        mock_tb = AsyncMock()
+        svc = ForecastService(mock_tb)
+
+        await svc._fill_coverage_gaps("asset-X", df_partial, start, end)
+
+        mock_tb.post_telemetry.assert_not_called()
 
     def test_rollup_excludes_failed_plants_from_sum(self):
         """In-memory roll-up must NOT include plants with status != 'ok' in the sum."""
@@ -613,3 +676,94 @@ class TestStuckSensor:
         df_night = pd.DataFrame({"ghi": [0.0] * 10, "poa": [0.0] * 10}, index=idx)
         # Should be valid (night-time zeros) — ghi column present
         assert _is_valid(df_night), "Night-time zeros should not be flagged as stuck"
+
+    @pytest.mark.asyncio
+    async def test_station_fetch_prefers_finite_duplicate_value(self):
+        """Duplicate WSTN rows at same ts must not let NaN erase finite irradiance."""
+        from app.physics.config import PlantConfig
+        from app.physics.data_sources import _fetch_tb_station
+
+        ts_ms = int(_utc(0).timestamp() * 1000)
+        attrs = {
+            "latitude": 7.5,
+            "longitude": 81.7,
+            "timezone": "Asia/Colombo",
+            "weather_station_id": "wstn-1",
+            "station": json.dumps({
+                "ghi_key": "wstn1_tilted_irradiance",
+                "poa_key": "wstn1_tilted_irradiance",
+                "air_temp_key": "wstn1_temperature_ambient",
+            }),
+            "orientations": json.dumps([
+                {"name": "Main", "tilt": 0, "azimuth": 0,
+                 "module_count": 22040, "use_measured_poa": True}
+            ]),
+        }
+        config = PlantConfig.from_tb_attributes("ssk-asset", attrs)
+        mock_tb = AsyncMock()
+        mock_tb.get_timeseries.return_value = {
+            "wstn1_tilted_irradiance": [
+                {"ts": ts_ms, "value": "826.1"},
+                {"ts": ts_ms, "value": "NaN"},
+            ],
+            "wstn1_temperature_ambient": [
+                {"ts": ts_ms, "value": "31.2"},
+            ],
+        }
+
+        df = await _fetch_tb_station(config, _utc(0), _utc(1), mock_tb)
+
+        assert "ghi" not in df.columns
+        assert df["poa"].iloc[0] == pytest.approx(826.1)
+
+
+class TestSSKPhysicsGuard:
+
+    def _ssk_attrs(self, module_count=22040):
+        return {
+            "latitude": 7.527987,
+            "longitude": 81.73268,
+            "timezone": "Asia/Colombo",
+            "altitude_m": 5,
+            "Capacity": 10000,
+            "station": json.dumps({
+                "ghi_key": "wstn1_tilted_irradiance",
+                "poa_key": "wstn1_tilted_irradiance",
+                "air_temp_key": "wstn1_temperature_ambient",
+            }),
+            "orientations": json.dumps([
+                {"name": "Main", "tilt": 0, "azimuth": 0,
+                 "module_count": module_count, "use_measured_poa": True}
+            ]),
+            "module": json.dumps({"area_m2": 2.7012, "efficiency_stc": 0.235, "gamma_p": -0.0029}),
+            "inverter": json.dumps({"ac_rating_kw": 10200, "flat_efficiency": 0.9855}),
+            "defaults": json.dumps({"wind_speed_ms": 1, "air_temp_c": 28.43}),
+            "soiling": 0.03,
+            "mismatch": 0.021,
+            "dc_wiring": 0.015,
+            "module_quality": -0.008,
+        }
+
+    def test_ssk_full_module_count_clips_near_ac_rating(self):
+        from app.physics.config import PlantConfig
+        from app.physics.pipeline import compute_ac_power
+
+        config = PlantConfig.from_tb_attributes("ssk", self._ssk_attrs())
+        idx = pd.date_range("2026-05-08 12:00:00", periods=1, tz="Asia/Colombo")
+        weather = pd.DataFrame({"poa": [1000.0], "air_temp": [30.0], "wind_speed": [2.0]}, index=idx)
+
+        result = compute_ac_power(config, weather, "tb_station")
+
+        assert result["potential_power_kw"].iloc[0] == pytest.approx(10200.0)
+
+    def test_small_module_count_rejected_against_capacity(self):
+        from app.physics.config import PlantConfig
+        from app.services.forecast_service import ForecastService
+
+        config = PlantConfig.from_tb_attributes("ssk", self._ssk_attrs(module_count=2204))
+        svc = ForecastService(tb_client=MagicMock())
+
+        reason = svc._capacity_mismatch_reason(config)
+
+        assert reason is not None
+        assert "configured DC STC" in reason

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -86,6 +87,23 @@ async def select_irradiance(
 
 # ── Tier 1 implementation ──────────────────────────────────────────────────
 
+def _finite_station_series(records) -> pd.Series:
+    """Build a timestamp series from TB records, skipping NaN/Inf duplicates."""
+    values = {}
+    for record in records or []:
+        try:
+            ts = pd.Timestamp(record["ts"], unit="ms", tz="UTC")
+            value = float(record["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        values[ts] = value
+    if not values:
+        return pd.Series(dtype=float)
+    return pd.Series(values, dtype=float).sort_index()
+
+
 async def _fetch_tb_station(
     config: PlantConfig,
     start: datetime,
@@ -93,11 +111,10 @@ async def _fetch_tb_station(
     tb_client,
 ) -> pd.DataFrame:
     sc = config.station
-    keys = [sc.ghi_key, sc.air_temp_key]
-    if sc.poa_key:
-        keys.append(sc.poa_key)
-    if sc.wind_speed_key:
-        keys.append(sc.wind_speed_key)
+    keys = []
+    for key in (sc.ghi_key, sc.poa_key, sc.air_temp_key, sc.wind_speed_key):
+        if key and key not in keys:
+            keys.append(key)
 
     raw = await tb_client.get_timeseries(
         entity_type="DEVICE",
@@ -113,9 +130,9 @@ async def _fetch_tb_station(
     frames = {}
     for key, records in raw.items():
         if records:
-            s = pd.Series(
-                {pd.Timestamp(r["ts"], unit="ms", tz="UTC"): float(r["value"]) for r in records}
-            )
+            s = _finite_station_series(records)
+            if s.empty:
+                continue
             frames[key] = s
 
     if not frames:
@@ -126,7 +143,9 @@ async def _fetch_tb_station(
     df = df.sort_index()
 
     # Rename to canonical column names
-    rename = {sc.ghi_key: "ghi", sc.air_temp_key: "air_temp"}
+    rename = {sc.air_temp_key: "air_temp"}
+    if sc.ghi_key and sc.ghi_key in df.columns:
+        rename[sc.ghi_key] = "ghi"
     if sc.poa_key and sc.poa_key in df.columns:
         rename[sc.poa_key] = "poa"
     if sc.wind_speed_key and sc.wind_speed_key in df.columns:
@@ -139,14 +158,17 @@ async def _fetch_tb_station(
     if "poa" in df.columns:
         df["poa"] = df["poa"].clip(lower=0, upper=sc.sanity_max_poa_wm2)
 
-    # Freshness check: reject if last record is too old
+    # Freshness check only applies to live windows; historical backfills must
+    # be allowed to use historical station data.
     if not df.empty:
         now_local = datetime.now(timezone.utc).astimezone(
             ZoneInfo(config.timezone)
         )
+        end_local = end.astimezone(ZoneInfo(config.timezone))
         last_ts = df.index[-1]
         age_minutes = (now_local - last_ts).total_seconds() / 60
-        if age_minutes > sc.freshness_minutes:
+        window_age_minutes = (now_local - end_local).total_seconds() / 60
+        if window_age_minutes <= sc.freshness_minutes + 5 and age_minutes > sc.freshness_minutes:
             log.info(
                 "%s: station data is %.1f min old (limit %d min), treating as stale",
                 config.plant_name, age_minutes, sc.freshness_minutes,

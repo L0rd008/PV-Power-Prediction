@@ -24,6 +24,8 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -47,8 +49,14 @@ KEY_PVLIB_DAILY_ENERGY       = "pvlib_daily_energy_kwh"    # ops alias (kWh)
 KEY_DATA_SOURCE              = "pvlib_data_source"
 KEY_MODEL_VERSION            = "pvlib_model_version"
 KEY_UNIT                     = "ops_expected_unit"
+KEY_CONFIG_EFFECTIVE_KWP     = "pvlib_config_effective_kwp"
+KEY_CONFIG_CAPACITY_KWP      = "pvlib_config_capacity_kwp"
+KEY_CONFIG_HASH              = "pvlib_config_hash"
+KEY_STATION_MODE             = "pvlib_station_mode"
 
 MODEL_VERSION = "pvlib-h-a3-v1"
+CAPACITY_MISMATCH_LOW_RATIO = 0.50
+CAPACITY_MISMATCH_HIGH_RATIO = 2.00
 
 
 # ── Result dataclass ────────────────────────────────────────────────────────
@@ -142,6 +150,16 @@ class ForecastService:
             )
 
         # ── Weather data fetch ─────────────────────────────────────────────
+        mismatch = self._capacity_mismatch_reason(config)
+        if mismatch:
+            log.error("process_single_asset: %s for %s", mismatch, asset_id)
+            sentinels = self._build_sentinel_records(start, end, "config_capacity_mismatch")
+            await self._write_sentinels(asset_id, sentinels)
+            return PlantCycleResult(
+                asset_id=asset_id, status="config_error",
+                error=mismatch, sentinels=sentinels,
+            )
+
         try:
             df_weather, source = await select_irradiance(
                 config, start, end, self._tb, self._solcast_key
@@ -167,6 +185,7 @@ class ForecastService:
         # ── Physics ────────────────────────────────────────────────────────
         try:
             df_result = compute_ac_power(config, df_weather, data_source=source)
+            self._attach_config_metadata(df_result, config, df_weather)
         except Exception as exc:
             log.error("process_single_asset: physics failed for %s: %s", asset_id, exc)
             sentinels = self._build_sentinel_records(start, end, "physics_error")
@@ -633,6 +652,55 @@ class ForecastService:
 
     # ── Sentinel helpers ───────────────────────────────────────────────────
 
+    def _effective_dc_stc_kwp(self, config: PlantConfig) -> float:
+        """Return configured module DC STC size in kWp."""
+        module_count = sum(max(0, o.module_count) for o in config.orientations)
+        return module_count * config.module.area_m2 * config.module.efficiency_stc
+
+    def _capacity_mismatch_reason(self, config: PlantConfig) -> Optional[str]:
+        """Reject obviously wrong plant scaling before writing bad potential_power."""
+        if config.capacity_kwp is None or config.capacity_kwp <= 0:
+            return None
+        effective_kwp = self._effective_dc_stc_kwp(config)
+        if effective_kwp <= 0:
+            return "configured module_count/area/efficiency produces zero DC STC"
+        ratio = effective_kwp / config.capacity_kwp
+        if CAPACITY_MISMATCH_LOW_RATIO <= ratio <= CAPACITY_MISMATCH_HIGH_RATIO:
+            return None
+        return (
+            "configured DC STC %.1f kWp is %.2fx Capacity %.1f kWp "
+            "(allowed %.2fx..%.2fx)"
+        ) % (
+            effective_kwp, ratio, config.capacity_kwp,
+            CAPACITY_MISMATCH_LOW_RATIO, CAPACITY_MISMATCH_HIGH_RATIO,
+        )
+
+    def _station_mode(self, config: PlantConfig, df_weather: pd.DataFrame) -> str:
+        if "poa" in df_weather.columns and "ghi" not in df_weather.columns:
+            return "poa_only"
+        if any(o.use_measured_poa for o in config.orientations) and "poa" in df_weather.columns:
+            return "measured_poa"
+        if "ghi" in df_weather.columns:
+            return "ghi_transposed"
+        return "unknown"
+
+    def _config_hash(self, config: PlantConfig) -> str:
+        payload = config.model_dump(mode="json")
+        raw = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+    def _attach_config_metadata(
+        self,
+        df_result: pd.DataFrame,
+        config: PlantConfig,
+        df_weather: pd.DataFrame,
+    ) -> None:
+        df_result[KEY_CONFIG_EFFECTIVE_KWP] = round(self._effective_dc_stc_kwp(config), 3)
+        if config.capacity_kwp is not None:
+            df_result[KEY_CONFIG_CAPACITY_KWP] = round(float(config.capacity_kwp), 3)
+        df_result[KEY_CONFIG_HASH] = self._config_hash(config)
+        df_result[KEY_STATION_MODE] = self._station_mode(config, df_weather)
+
     def _build_sentinel_records(
         self, start: datetime, end: datetime, reason: str
     ) -> List[dict]:
@@ -694,6 +762,12 @@ class ForecastService:
         if df_result.empty:
             return
 
+        # Live scheduler windows are intentionally short. A missing adjacent
+        # minute inside that window is sampling jitter, not a durable data gap.
+        if (end - start) <= timedelta(minutes=2):
+            log.debug("_fill_coverage_gaps: skip short live-like window for %s", asset_id)
+            return
+
         # Rule 2: coverage by minute-bucket (ms).
         covered_minutes_ms: Set[int] = set()
         for ts in df_result.index:
@@ -745,14 +819,21 @@ def _build_ac_telemetry(df: pd.DataFrame) -> List[dict]:
         kw = float(row["potential_power_kw"])
         if kw < 0:
             kw = 0.0
+        values = {
+            KEY_POTENTIAL_POWER: round(kw, 3),
+            KEY_PVLIB_POWER: round(kw, 3),
+            KEY_DATA_SOURCE: str(row.get("data_source", "unknown")),
+            KEY_MODEL_VERSION: str(row.get("model_version", MODEL_VERSION)),
+            KEY_UNIT: "kW",
+        }
+        for key in (KEY_CONFIG_EFFECTIVE_KWP, KEY_CONFIG_CAPACITY_KWP):
+            if key in row and pd.notna(row[key]):
+                values[key] = round(float(row[key]), 3)
+        for key in (KEY_CONFIG_HASH, KEY_STATION_MODE):
+            if key in row and pd.notna(row[key]):
+                values[key] = str(row[key])
         records.append({
             "ts": ts_ms,
-            "values": {
-                KEY_POTENTIAL_POWER: round(kw, 3),
-                KEY_PVLIB_POWER: round(kw, 3),
-                KEY_DATA_SOURCE: str(row.get("data_source", "unknown")),
-                KEY_MODEL_VERSION: str(row.get("model_version", MODEL_VERSION)),
-                KEY_UNIT: "kW",
-            },
+            "values": values,
         })
     return records

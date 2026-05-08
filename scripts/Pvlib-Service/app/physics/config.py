@@ -100,7 +100,7 @@ class IAMConfig(BaseModel):
 class StationConfig(BaseModel):
     """Weather station data mapping and quality gates."""
 
-    ghi_key: str = "ghi"
+    ghi_key: Optional[str] = "ghi"
     """ThingsBoard telemetry key for Global Horizontal Irradiance (W/m²)."""
 
     poa_key: Optional[str] = None
@@ -222,6 +222,17 @@ class PlantConfig(BaseModel):
         """Ensure at least one default orientation if none provided."""
         if not self.orientations:
             self.orientations = [OrientationConfig()]
+        self._normalize_poa_only_station()
+
+    def _normalize_poa_only_station(self) -> None:
+        """Treat identical GHI/POA station keys as POA-only data."""
+        if self.station.poa_key and self.station.ghi_key == self.station.poa_key:
+            log.warning(
+                "asset %s: station ghi_key equals poa_key (%s); treating station as POA-only",
+                self.asset_id,
+                self.station.poa_key,
+            )
+            self.station.ghi_key = None
 
     # ────────────────────────────────────────────────────────────────────
     # Factory method
@@ -267,10 +278,10 @@ class PlantConfig(BaseModel):
         pvlib_cfg = jparse("pvlib_config")
         if isinstance(pvlib_cfg, dict):
             log.debug("asset %s: loading config from pvlib_config blob", asset_id)
-            return cls._from_blob(asset_id, pvlib_cfg, attrs)
+            return cls._apply_legacy_flags(cls._from_blob(asset_id, pvlib_cfg, attrs), pvlib_cfg, attrs)
 
         log.debug("asset %s: loading config from flat attributes", asset_id)
-        return cls._from_flat(asset_id, attrs)
+        return cls._apply_legacy_flags(cls._from_flat(asset_id, attrs), {}, attrs)
 
     @classmethod
     def _from_blob(cls, asset_id: str, cfg: dict, attrs: dict) -> "PlantConfig":
@@ -327,7 +338,7 @@ class PlantConfig(BaseModel):
             p341_device_id=cfg.get("p341_device_id") or attrs.get("p341_device_id"),
             active_power_unit=str(attrs.get("active_power_unit", "kW")),
             solcast_resource_id=cfg.get("solcast_resource_id") or attrs.get("solcast_resource_id"),
-            capacity_kwp=float(attrs["Capacity"]) if attrs.get("Capacity") is not None else None,
+            capacity_kwp=_capacity_kwp(attrs),
         )
 
     @classmethod
@@ -396,5 +407,43 @@ class PlantConfig(BaseModel):
             p341_device_id=attrs.get("p341_device_id"),
             active_power_unit=str(attrs.get("active_power_unit", "kW")),
             solcast_resource_id=attrs.get("solcast_resource_id"),
-            capacity_kwp=float(attrs["Capacity"]) if attrs.get("Capacity") is not None else None,
+            capacity_kwp=_capacity_kwp(attrs),
         )
+
+    @staticmethod
+    def _apply_legacy_flags(config: "PlantConfig", cfg: dict, attrs: dict) -> "PlantConfig":
+        """Honor legacy top-level use_measured_poa=true as an all-orientation opt-in."""
+        legacy_poa = cfg.get("use_measured_poa", attrs.get("use_measured_poa"))
+        if _truthy(legacy_poa):
+            changed = [o.name for o in config.orientations if not o.use_measured_poa]
+            for orient in config.orientations:
+                orient.use_measured_poa = True
+            if changed:
+                log.warning(
+                    "asset %s: top-level use_measured_poa=true overrides orientation flags for %s",
+                    config.asset_id,
+                    ",".join(changed),
+                )
+        return config
+
+
+def _capacity_kwp(attrs: dict) -> Optional[float]:
+    raw = attrs.get("Capacity")
+    if raw is None:
+        raw = attrs.get("capacity_kwp")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    unit = str(attrs.get("capacityUnit") or attrs.get("capacity_unit") or "kW").strip().upper()
+    return value * 1000.0 if unit == "MW" else value
+
+
+def _truthy(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("true", "1", "yes", "y", "on")
