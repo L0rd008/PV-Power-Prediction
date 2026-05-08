@@ -93,6 +93,9 @@ _KEY_POTENTIAL_POWER = "potential_power"
 
 # Setpoint threshold below which we compute curtailment ceiling (mirror widget)
 CURTAIL_SETPOINT_THRESHOLD = 99.5
+POTENTIAL_UNDER_ACTIVE_RATIO = 2.0
+POTENTIAL_UNDER_ACTIVE_MIN_SAMPLES = 30
+POTENTIAL_UNDER_ACTIVE_MIN_CAPACITY_FRACTION = 0.20
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -434,6 +437,15 @@ async def _process_plant(
         return _make_sentinel_result("error:insufficient_samples")
 
     # ── Build setpoint step-hold series ─────────────────────────────────────
+    if _potential_under_active(potential_series, actual_series, capacity_kw):
+        log.error(
+            "_process_plant: potential_power is materially below active_power for %s "
+            "(median active/potential > %.1fx) - writing -1",
+            plant_id, POTENTIAL_UNDER_ACTIVE_RATIO,
+        )
+        await _write(_sentinel_daily_values(), "error:potential_under_active")
+        return _make_sentinel_result("error:potential_under_active")
+
     setpoint_series = _build_setpoint_series(setpoint_raw, setpoint_keys)
 
     # ── Integration ──────────────────────────────────────────────────────────
@@ -473,6 +485,31 @@ async def _process_plant(
 
 
 # ── Integration math ─────────────────────────────────────────────────────────
+
+def _potential_under_active(
+    potential: pd.Series,
+    actual: pd.Series,
+    capacity_kw: float,
+) -> bool:
+    """Return True when potential_power is implausibly below measured export."""
+    if potential.empty or actual.empty:
+        return False
+    start = min(potential.index.min(), actual.index.min()).floor("1min")
+    end = max(potential.index.max(), actual.index.max()).ceil("1min")
+    idx = pd.date_range(start, end, freq="1min", tz="UTC")
+    pot = potential.resample("1min").mean().reindex(idx)
+    act = actual.resample("1min").mean().reindex(idx)
+    min_active_kw = max(capacity_kw * POTENTIAL_UNDER_ACTIVE_MIN_CAPACITY_FRACTION, 100.0)
+    frame = pd.DataFrame({"potential": pot, "actual": act}).dropna()
+    frame = frame[
+        (frame["potential"] > 0)
+        & (frame["actual"] >= min_active_kw)
+    ]
+    if len(frame) < POTENTIAL_UNDER_ACTIVE_MIN_SAMPLES:
+        return False
+    ratio = frame["actual"] / frame["potential"]
+    return float(ratio.median()) > POTENTIAL_UNDER_ACTIVE_RATIO
+
 
 def _integrate(
     potential: pd.Series,

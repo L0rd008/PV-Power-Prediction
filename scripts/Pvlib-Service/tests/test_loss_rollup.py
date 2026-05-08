@@ -48,6 +48,7 @@ from app.services.loss_rollup_job import (
     _integrate,
     _records_to_series,
     _build_setpoint_series,
+    _potential_under_active,
     _sentinel_daily_values,
     _sum_daily_values,
     _lifetime_increment_step,
@@ -212,6 +213,24 @@ class TestIntegrationMath:
         # Only the first 3 hours of potential contribute to loss
         # gross loss: 3h × 60 min × (100−50)/60 = 150 kWh
         assert result[KEY_LOSS_GRID_DAILY] == pytest.approx(150.0, rel=1e-2)
+
+    def test_potential_under_active_guard_detects_bad_model(self):
+        """Sustained actual > 2x potential at strong output means potential model is invalid."""
+        start = _utc(8, 0, 3)
+        end = _utc(9, 0, 3)
+        pot = self._day_series(start, end, 1000.0)
+        act = self._day_series(start, end, 9000.0)
+
+        assert _potential_under_active(pot, act, capacity_kw=10000.0)
+
+    def test_potential_under_active_guard_ignores_small_sample(self):
+        """Short spikes are ignored so one-off telemetry glitches do not poison the day."""
+        start = _utc(8, 0, 3)
+        end = _utc(8, 5, 3)
+        pot = self._day_series(start, end, 1000.0)
+        act = self._day_series(start, end, 9000.0)
+
+        assert not _potential_under_active(pot, act, capacity_kw=10000.0)
 
 
 # ════════════════════════════════════════════════════════════════════════════
