@@ -11,6 +11,7 @@ The from_tb_attributes() classmethod auto-detects which layout is present.
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from typing import Optional
@@ -358,13 +359,32 @@ class PlantConfig(BaseModel):
         """
 
         def jparse(key, default=None):
-            """Parse JSON value or return as-is if not JSON."""
+            """Parse a ThingsBoard attribute value into a Python object.
+
+            Handles three formats TB may return:
+              1. Native dict/list  (TB REST API already parsed the JSON)
+              2. JSON string       (double-quoted, e.g. '{"key": "val"}')
+              3. Python repr string (single-quoted, e.g. "{'key': 'val'}")
+                 — produced when the attribute was stored as a Python dict
+                   and displayed via str().  json.loads() fails here; we fall
+                   back to ast.literal_eval which is safe for Python literals.
+            """
             val = attrs.get(key, default)
             if isinstance(val, str):
+                # Try strict JSON first
                 try:
                     return json.loads(val)
                 except (json.JSONDecodeError, ValueError):
-                    return default
+                    pass
+                # Fall back to Python literal eval (handles single-quoted repr)
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, (dict, list)):
+                        log.debug("asset %s: jparse(%r) used ast.literal_eval", asset_id, key)
+                        return parsed
+                except (ValueError, SyntaxError):
+                    pass
+                return default
             return val if val is not None else default
 
         def _float(key, default=0.0):
@@ -394,7 +414,7 @@ class PlantConfig(BaseModel):
             iam=IAMConfig(**iam_raw) if iam_raw else IAMConfig(),
             station=StationConfig(**station_raw) if station_raw else StationConfig(),
             defaults=DefaultsConfig(**defaults_raw) if defaults_raw else DefaultsConfig(),
-            thermal_model=str(attrs.get("thermal_model", "open_rack_glass_glass")),
+            thermal_model=_parse_thermal_model(attrs.get("thermal_model", "open_rack_glass_glass")),
             soiling=_float("soiling"),
             lid=_float("lid"),
             module_quality=_float("module_quality"),
@@ -437,6 +457,47 @@ def _capacity_kwp(attrs: dict) -> Optional[float]:
         return None
     unit = str(attrs.get("capacityUnit") or attrs.get("capacity_unit") or "kW").strip().upper()
     return value * 1000.0 if unit == "MW" else value
+
+
+def _parse_thermal_model(value) -> str:
+    """Normalise the thermal_model attribute to a string SAPM key.
+
+    TB may return the value as:
+      - A plain string SAPM name: "open_rack_glass_glass"
+      - A JSON string of a Faiman dict: '{"Uc": 29, "Uv": 0}'
+      - A Python repr string: "{'Uc': 29, 'Uv': 0}"
+      - A native Python dict: {"Uc": 29, "Uv": 0}
+
+    Faiman dicts are converted to the canonical string "faiman:<Uc>/<Uv>"
+    which pipeline.py can later detect. For now the pipeline falls back to
+    the SAPM default when the key is not recognised, which is harmless and
+    only introduces a small cell-temperature error.
+    """
+    if value is None:
+        return "open_rack_glass_glass"
+    if isinstance(value, dict):
+        # Native dict from TB — Faiman params
+        return f"faiman:{value.get('Uc', 29)}/{value.get('Uv', 0)}"
+    if isinstance(value, str):
+        # Try JSON parse first
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return f"faiman:{parsed.get('Uc', 29)}/{parsed.get('Uv', 0)}"
+            return str(parsed)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Try Python repr
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, dict):
+                return f"faiman:{parsed.get('Uc', 29)}/{parsed.get('Uv', 0)}"
+        except (ValueError, SyntaxError):
+            pass
+        # Plain string — return as-is (e.g. "open_rack_glass_glass")
+        return value
+    return str(value)
+
 
 
 def _truthy(value) -> bool:
