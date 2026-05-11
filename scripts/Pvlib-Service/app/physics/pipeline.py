@@ -109,13 +109,18 @@ def compute_ac_power(
 
     # Config snapshot — visible at INFO level to diagnose parse issues
     total_modules = sum(o.module_count for o in config.orientations)
+    poa_vals = poa_measured.dropna()
     log.info(
         "pipeline [%s]: module_count=%d area_m2=%.4f eff=%.4f "
-        "ac_kw=%.0f thermal=%r use_poa=%s",
+        "ac_kw=%.0f thermal=%r use_poa=%s | "
+        "poa n=%d mean=%.1f max=%.1f W/m2",
         config.plant_name, total_modules, config.module.area_m2,
         config.module.efficiency_stc, config.inverter.ac_rating_kw,
         config.thermal_model,
         [o.use_measured_poa for o in config.orientations],
+        len(poa_vals),
+        float(poa_vals.mean()) if len(poa_vals) else 0.0,
+        float(poa_vals.max()) if len(poa_vals) else 0.0,
     )
 
     sapm_params = _SAPM_PARAMS.get(config.thermal_model)
