@@ -280,6 +280,15 @@ def _clearsky(config: PlantConfig, start: datetime, end: datetime) -> pd.DataFra
         altitude=config.altitude_m,
         tz=config.timezone,
     )
+    # pandas date_range raises AssertionError when start/end are tz-aware with a
+    # different timezone than the tz= parameter (e.g. UTC start + Asia/Colombo tz).
+    # Fix: convert to the plant's local timezone, strip tzinfo, then let
+    # pd.date_range apply tz= as a localisation (not a conversion).
+    _plant_tz = ZoneInfo(config.timezone)
+    if start.tzinfo is not None:
+        start = start.astimezone(_plant_tz).replace(tzinfo=None)
+    if end.tzinfo is not None:
+        end = end.astimezone(_plant_tz).replace(tzinfo=None)
     times = pd.date_range(start=start, end=end, freq="1min", tz=config.timezone)
     cs = loc.get_clearsky(times, model="ineichen")
     df = pd.DataFrame({
