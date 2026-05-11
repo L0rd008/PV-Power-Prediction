@@ -491,18 +491,33 @@ def _potential_under_active(
     actual: pd.Series,
     capacity_kw: float,
 ) -> bool:
-    """Return True when potential_power is implausibly below measured export."""
+    """Return True when potential_power is implausibly below measured export.
+
+    Only the most recent 2 hours of data are evaluated so that stale bad
+    values written before a config correction do not trigger false rejections.
+    Sentinel values (<=0 or >25000 kW) are excluded before the ratio check.
+    """
     if potential.empty or actual.empty:
         return False
+
+    # Trim to most recent 2 hours to ignore stale/pre-fix data
+    cutoff = max(potential.index.max(), actual.index.max()) - pd.Timedelta(hours=2)
+    potential = potential[potential.index >= cutoff]
+    actual    = actual[actual.index >= cutoff]
+
+    if potential.empty or actual.empty:
+        return False
+
     start = min(potential.index.min(), actual.index.min()).floor("1min")
-    end = max(potential.index.max(), actual.index.max()).ceil("1min")
-    idx = pd.date_range(start, end, freq="1min", tz="UTC")
-    pot = potential.resample("1min").mean().reindex(idx)
-    act = actual.resample("1min").mean().reindex(idx)
+    end   = max(potential.index.max(), actual.index.max()).ceil("1min")
+    idx   = pd.date_range(start, end, freq="1min", tz="UTC")
+    pot   = potential.resample("1min").mean().reindex(idx)
+    act   = actual.resample("1min").mean().reindex(idx)
     min_active_kw = max(capacity_kw * POTENTIAL_UNDER_ACTIVE_MIN_CAPACITY_FRACTION, 100.0)
     frame = pd.DataFrame({"potential": pot, "actual": act}).dropna()
     frame = frame[
         (frame["potential"] > 0)
+        & (frame["potential"] <= 25_000)   # exclude obvious sentinels / runaway values
         & (frame["actual"] >= min_active_kw)
     ]
     if len(frame) < POTENTIAL_UNDER_ACTIVE_MIN_SAMPLES:
