@@ -152,7 +152,10 @@ class ForecastService:
         # ── Weather data fetch ─────────────────────────────────────────────
         mismatch = self._capacity_mismatch_reason(config)
         if mismatch:
-            log.error("process_single_asset: %s for %s", mismatch, asset_id)
+            log.error("process_single_asset: CAPACITY MISMATCH for %s: %s", asset_id, mismatch)
+            log.error("  effective_kwp=%.1f capacity_kwp=%s allowed=[%.2f–%.2f]x",
+                      self._effective_dc_stc_kwp(config), config.capacity_kwp,
+                      CAPACITY_MISMATCH_LOW_RATIO, CAPACITY_MISMATCH_HIGH_RATIO)
             sentinels = self._build_sentinel_records(start, end, "config_capacity_mismatch")
             await self._write_sentinels(asset_id, sentinels)
             return PlantCycleResult(
@@ -174,7 +177,8 @@ class ForecastService:
             )
 
         if df_weather.empty:
-            log.warning("process_single_asset: no weather data for %s", asset_id)
+            log.warning("process_single_asset: no weather data for %s (source=%s)",
+                        asset_id, source)
             sentinels = self._build_sentinel_records(start, end, "no_data")
             await self._write_sentinels(asset_id, sentinels)
             return PlantCycleResult(
@@ -186,6 +190,10 @@ class ForecastService:
         try:
             df_result = compute_ac_power(config, df_weather, data_source=source)
             self._attach_config_metadata(df_result, config, df_weather)
+            log.info("process_single_asset: physics OK for %s — rows=%d mean_kw=%.1f max_kw=%.1f",
+                     asset_id, len(df_result),
+                     float(df_result['potential_power_kw'].mean()),
+                     float(df_result['potential_power_kw'].max()))
         except Exception as exc:
             log.error("process_single_asset: physics failed for %s: %s", asset_id, exc)
             sentinels = self._build_sentinel_records(start, end, "physics_error")
@@ -246,6 +254,8 @@ class ForecastService:
         try:
             plants, ancestor_map = await self._tb.discover_plants(root_asset_ids)
             await jm.update(job.job_id, plants_total=len(plants))
+            log.info("run_fleet_cycle: discovered %d plants: %s",
+                     len(plants), [p.name for p in plants])
 
             if not plants:
                 log.warning("run_fleet_cycle: no pvlib-enabled plants found")

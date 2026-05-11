@@ -142,10 +142,15 @@ def compute_ac_power(
     total_dc_kw = pd.Series(0.0, index=idx)
 
     for orient in config.orientations:
-        # ── Step 1: POA irradiance ────────────────────────────────────────
+        # ── Step 1: POA irradiance ──────────────────────────────────
         # Auto-fallback to POA if GHI is entirely missing/zero but POA exists.
         has_ghi = ghi.notna().any() and (ghi > 0).any()
         use_poa = (orient.use_measured_poa or not has_ghi) and poa_measured.notna().any()
+        log.info("[%s][%s] use_poa=%s has_ghi=%s poa_n=%d poa_mean=%.1f ghi_mean=%.1f",
+                 config.plant_name, orient.name, use_poa, has_ghi,
+                 poa_measured.notna().sum(),
+                 float(poa_measured.mean()) if poa_measured.notna().any() else 0,
+                 float(ghi.mean()) if ghi.notna().any() else 0)
 
         if use_poa:
             poa_global = poa_measured.fillna(0.0)
@@ -215,6 +220,10 @@ def compute_ac_power(
 
         pdc_kw = (poa_eff / 1000.0) * total_area_m2 * config.module.efficiency_stc * temp_coeff
 
+        log.info("[%s][%s] n_mod=%d poa_eff_mean=%.1f t_cell_mean=%.1f pdc_mean=%.1f kW",
+                 config.plant_name, orient.name, n_modules,
+                 float(poa_eff.mean()), float(t_cell.mean()), float(pdc_kw.mean()))
+
         total_dc_kw += pdc_kw.fillna(0.0)
 
     # ── Step 6: DC losses (sequential multiplication) ────────────────────
@@ -234,13 +243,17 @@ def compute_ac_power(
     else:
         eta_inv = pd.Series(inv.flat_efficiency, index=idx)
 
-    pac_kw = (total_dc_kw * eta_inv).fillna(0.0)
+    pac_kw = total_dc_kw * eta_inv
 
-    # ── Step 8: AC rating clip ─────────────────────────────────────────────
+    # ── Step 8: AC rating clip ───────────────────────────────────────
     pac_kw = pac_kw.clip(upper=inv.ac_rating_kw, lower=0.0)
 
-    # ── Step 9: AC wiring loss ────────────────────────────────────────────
+    # ── Step 9: AC wiring loss ───────────────────────────────────
     pac_kw = pac_kw * (1.0 - config.ac_wiring)
+
+    log.info("[%s] OUTPUT: dc_loss=%.4f pac_mean=%.1f pac_max=%.1f pac_min=%.1f kW",
+             config.plant_name, dc_loss_factor,
+             float(pac_kw.mean()), float(pac_kw.max()), float(pac_kw.min()))
 
     # Zero out night-time (Gap 25: use effective irradiance so POA-only stations work correctly)
     # If either GHI or POA detects sunlight (> 1 W/m²), do not zero out the power.
