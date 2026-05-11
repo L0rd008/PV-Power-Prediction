@@ -107,6 +107,17 @@ def compute_ac_power(
     # Solar position (used for Perez transposition and AOI)
     solpos = loc.get_solarposition(idx)
 
+    # Config snapshot — visible at INFO level to diagnose parse issues
+    total_modules = sum(o.module_count for o in config.orientations)
+    log.info(
+        "pipeline [%s]: module_count=%d area_m2=%.4f eff=%.4f "
+        "ac_kw=%.0f thermal=%r use_poa=%s",
+        config.plant_name, total_modules, config.module.area_m2,
+        config.module.efficiency_stc, config.inverter.ac_rating_kw,
+        config.thermal_model,
+        [o.use_measured_poa for o in config.orientations],
+    )
+
     sapm_params = _SAPM_PARAMS.get(config.thermal_model)
     faiman_params = None
     if sapm_params is None:
