@@ -107,7 +107,21 @@ def compute_ac_power(
     # Solar position (used for Perez transposition and AOI)
     solpos = loc.get_solarposition(idx)
 
-    sapm_params = _SAPM_PARAMS.get(config.thermal_model, _DEFAULT_SAPM)
+    sapm_params = _SAPM_PARAMS.get(config.thermal_model)
+    faiman_params = None
+    if sapm_params is None:
+        if config.thermal_model.startswith("faiman:"):
+            try:
+                _, uc_uv = config.thermal_model.split(":", 1)
+                uc, uv = uc_uv.split("/")
+                faiman_params = {"Uc": float(uc), "Uv": float(uv)}
+            except (ValueError, AttributeError):
+                log.warning("pipeline: cannot parse faiman params from %r — using SAPM default",
+                            config.thermal_model)
+        if sapm_params is None and faiman_params is None:
+            log.warning("pipeline: unknown thermal_model %r — using open_rack_glass_glass",
+                        config.thermal_model)
+            sapm_params = _DEFAULT_SAPM
 
     total_dc_kw = pd.Series(0.0, index=idx)
 
@@ -148,15 +162,24 @@ def compute_ac_power(
         # ── Step 2: Far shading (pre-IAM) ─────────────────────────────────
         poa_global = poa_global * config.far_shading
 
-        # ── Step 3: SAPM cell temperature ──────────────────────────────────
-        t_cell = pvlib.temperature.sapm_cell(
-            poa_global=poa_global,
-            temp_air=air_temp,
-            wind_speed=wind_speed,
-            a=sapm_params["a"],
-            b=sapm_params["b"],
-            deltaT=sapm_params["deltaT"],
-        )
+        # ── Step 3: Cell temperature ───────────────────────────────────────
+        if faiman_params is not None:
+            t_cell = pvlib.temperature.faiman(
+                poa_global=poa_global,
+                temp_air=air_temp,
+                wind_speed=wind_speed,
+                u0=faiman_params["Uc"],   # Uc [W/m²/°C] → pvlib u0
+                u1=faiman_params["Uv"],   # Uv [W/m²/°C/(m/s)] → pvlib u1
+            )
+        else:
+            t_cell = pvlib.temperature.sapm_cell(
+                poa_global=poa_global,
+                temp_air=air_temp,
+                wind_speed=wind_speed,
+                a=sapm_params["a"],
+                b=sapm_params["b"],
+                deltaT=sapm_params["deltaT"],
+            )
 
         # ── Step 4: IAM correction ─────────────────────────────────────────
         if use_poa:
