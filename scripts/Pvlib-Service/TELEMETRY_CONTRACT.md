@@ -1,6 +1,6 @@
 # Pvlib-Service — Telemetry Key Contract
 
-*Version 1.0 — 2026-04-23. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+*Version 1.1 — 2026-05-12. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
 
 ---
 
@@ -233,3 +233,72 @@ The `pvlib_*` ops aliases (`active_power_pvlib_kw`, `pvlib_daily_energy_kwh`) ma
 | Loss Attribution widget | `Widgets/Grid & Losses/Loss Attribution` | Datasource-agnostic — wire the TB datasource key to `potential_power` (instantaneous) or `total_generation_expected_kwh` (daily energy mode). No code change required. |
 | Forecast vs Actual Energy | `Widgets/Forecasts & Risk/Forecast vs Actual Energy` | Gap 8: fetches `total_generation_expected_kwh` as Dataset 5 (green dotted "Physics Expected" line). Setting: **pvlibExpectedKey** (default `total_generation_expected_kwh`). kWh auto-converted to MWh for display. |
 | Portfolio Status Map | `Widgets/Portfolio/Portfolio Site Status Map` | Uses `isPlant`/`isPlantAgg` attributes for hierarchy — no telemetry keys, unaffected. |
+
+---
+
+## P-Value Forecast Keys
+
+Written by `app/services/pvalue_job.py`. Source: PVGIS-ERA5 multi-year historical simulation (2005–2023) → monthly percentile calculation → flat daily derivation. Triggered annually (Jan 1, 03:00 local) and on-demand via `/admin/run-pvalues`.
+
+> **Unit note:** Daily and monthly P-value keys are in **MWh** — consistent with the widget display layer, which expects MWh and does not divide. Annual `*_energy` attributes are in **kWh** — consistent with all other energy attributes on the plant asset.
+
+### Daily Timeseries
+
+Written as 365 rows per plant per year. Timestamp = local midnight of each calendar day.
+
+| Key | Unit | Description | Widget |
+|---|---|---|---|
+| `forecast_p50_daily` | MWh | Median (P50) expected daily energy. 50% of historical days exceeded this. | Forecast vs Actual Energy (P50 line) |
+| `forecast_p90_daily` | MWh | P90 expected daily energy. Only 10% of historical days fell below this — conservative lower bound. | Forecast vs Actual Energy (P90 band lower edge) |
+| `forecast_p95_daily` | MWh | P95 expected daily energy. Only 5% of historical days fell below this — risk threshold. | Forecast vs Actual Energy (P95 outer band) |
+
+### Monthly Timeseries
+
+Written as 12 rows per plant per year. Timestamp = local midnight of 1st of each month.
+
+| Key | Unit | Description | Widget |
+|---|---|---|---|
+| `forecast_p50_monthly` | MWh | Median expected monthly energy. | Forecast vs Actual Energy (monthly bar reference) |
+| `forecast_p90_monthly` | MWh | P90 expected monthly energy. | Forecast vs Actual Energy (risk threshold) |
+| `forecast_p95_monthly` | MWh | P95 expected monthly energy. | Forecast vs Actual Energy (outer risk band) |
+
+### Annual SERVER\_SCOPE Attributes
+
+Written once per plant per run. These supersede any manually set values.
+
+| Key | Unit | Description | Widget |
+|---|---|---|---|
+| `p50_energy` | kWh | Annual P50 energy yield (true 50th percentile of 19-year annual totals). | FDI card (derived-mode denominator) |
+| `p90_energy` | kWh | Annual P90 energy yield (10th percentile). | Risk reporting |
+| `p95_energy` | kWh | Annual P95 energy yield (5th percentile). | Risk reporting |
+
+### Diagnostic Attributes (also written to SERVER\_SCOPE)
+
+| Key | Type | Description |
+|---|---|---|
+| `pvalue_model_version` | string | Algorithm version tag — `"pvalue-monthly-v1"`. Increment when algorithm changes. |
+| `pvalue_updated_at` | string | ISO-8601 UTC timestamp of the last successful pvalue job run for this plant. |
+| `pvalue_target_year` | int | Calendar year the daily/monthly telemetry was stamped against. |
+
+### Monotonicity Contract
+
+The job enforces and logs a warning if violated:
+
+```
+p50_energy ≥ p90_energy ≥ p95_energy   (always)
+forecast_p50_daily ≥ forecast_p90_daily ≥ forecast_p95_daily   (per day)
+```
+
+Any violation indicates bad PVGIS data for that grid cell — inspect logs and re-run after verifying PVGIS availability.
+
+### FDI MTD Derivation (widget-side, no new service keys)
+
+The FDI card computes month-to-date deviation by fetching `forecast_p50_daily` for the current month and summing — no dedicated MTD key is written. This keeps the telemetry contract clean and avoids redundant intra-month writes.
+
+```
+FDI_MTD% = (Σ actual_kwh[day 1..today] − Σ p50_daily_kwh[day 1..today])
+            / Σ p50_daily_kwh[day 1..today] × 100
+```
+
+Note: `forecast_p50_daily` is in MWh; the widget converts to kWh (×1000) before summing to match `total_generation_expected_kwh` units.
+

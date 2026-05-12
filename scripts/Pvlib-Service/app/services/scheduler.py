@@ -217,6 +217,48 @@ async def run_daily_now(date: Optional[datetime] = None) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
+async def run_pvalue_job_now(
+    target_year: Optional[int] = None,
+    plant_ids: Optional[list] = None,
+) -> dict:
+    """Trigger the P-value batch job immediately.
+
+    Used by /admin/run-pvalues, /admin/run-pvalues-plant, and the annual Jan-1 cron.
+
+    Parameters
+    ----------
+    target_year : int, optional
+        Calendar year to stamp daily/monthly timeseries against.
+        Defaults to current local year inside pvalue_job.run_pvalue_job().
+    plant_ids : list[str], optional
+        Restrict to specific asset UUIDs (smoke-test mode).
+        None = full fleet.
+    """
+    from app.services.pvalue_job import run_pvalue_job
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    effective_client = _tb_client
+    try:
+        if effective_client is not None:
+            return await run_pvalue_job(
+                effective_client,
+                target_year=target_year,
+                plant_ids=plant_ids,
+            )
+        else:
+            async with ThingsBoardClient(
+                settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+            ) as tb:
+                return await run_pvalue_job(
+                    tb,
+                    target_year=target_year,
+                    plant_ids=plant_ids,
+                )
+    except Exception as exc:
+        log.exception("run_pvalue_job_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 def start_scheduler(tb_client=None) -> None:
     """Start APScheduler if SCHEDULER_ENABLED is true.
 
@@ -314,6 +356,26 @@ def start_scheduler(tb_client=None) -> None:
         id="pvlib_weekly_eval",
         replace_existing=True,
     )
+
+    # Annual P-value job: cron at 03:00 on Jan 1 local time.
+    # misfire_grace_time=86400 (24 h): handles a service restart any time on Jan 1.
+    # Gated on PVALUE_JOB_ENABLED — safe to deploy disabled; enable after smoke-test.
+    if settings.PVALUE_JOB_ENABLED:
+        scheduler.add_job(
+            run_pvalue_job_now,
+            trigger="cron",
+            month=1,
+            day=1,
+            hour=3,
+            minute=0,
+            misfire_grace_time=86400,
+            max_instances=1,
+            id="pvlib_pvalue",
+            replace_existing=True,
+        )
+        log.info("scheduler: P-value cron registered at Jan-1 03:00 %s", settings.TZ_LOCAL)
+    else:
+        log.info("scheduler: P-value cron NOT registered (PVALUE_JOB_ENABLED=false)")
 
     scheduler.start()
     log.info(

@@ -23,7 +23,14 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.job_manager import job_manager
-from app.services.scheduler import cycle_state, run_cycle_now, run_daily_now, run_loss_rollup_now, run_today_partial_now
+from app.services.scheduler import (
+    cycle_state,
+    run_cycle_now,
+    run_daily_now,
+    run_loss_rollup_now,
+    run_pvalue_job_now,
+    run_today_partial_now,
+)
 
 router = APIRouter()
 
@@ -497,3 +504,58 @@ async def metrics():
         f'pvlib_discover_cache_misses_total {_discover_cache_misses_total}',
     ]
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@router.post("/admin/run-pvalues")
+async def admin_run_pvalues(
+    year: Optional[int] = Query(
+        None,
+        description="Target calendar year for daily/monthly telemetry timestamps. "
+                    "Defaults to current local year. Use for backfill (e.g. year=2025).",
+    ),
+):
+    """Trigger the P-value batch job for the full fleet.
+
+    Fetches PVGIS-ERA5 multi-year hourly data per unique grid cell, runs the
+    existing pvlib physics pipeline for each historical year, computes monthly
+    P50/P90/P95 percentiles, and writes 9 telemetry keys per plant to TB:
+
+      Daily timeseries   : forecast_p50_daily, forecast_p90_daily, forecast_p95_daily  (MWh)
+      Monthly timeseries : forecast_p50_monthly, forecast_p90_monthly, forecast_p95_monthly (MWh)
+      SERVER_SCOPE attrs : p50_energy, p90_energy, p95_energy  (kWh)
+
+    This endpoint runs synchronously and returns once all plants are processed.
+    For a single-plant smoke test before fleet-wide backfill, use /admin/run-pvalues-plant.
+
+    Typical runtime: 5–20 min depending on fleet size and PVGIS API latency.
+    """
+    result = await run_pvalue_job_now(target_year=year)
+    return result
+
+
+@router.post("/admin/run-pvalues-plant")
+async def admin_run_pvalues_plant(
+    asset_id: str = Query(..., description="Asset UUID of the plant to compute P-values for."),
+    year: Optional[int] = Query(
+        None,
+        description="Target calendar year. Defaults to current local year.",
+    ),
+):
+    """Trigger the P-value batch job for a single plant (smoke test).
+
+    Identical to /admin/run-pvalues but restricted to one asset UUID.
+    Run this first on a known-good plant (e.g. KSP) to validate output
+    before triggering the full fleet with /admin/run-pvalues.
+
+    Verify the result:
+      - plants_ok == 1, plants_failed == 0
+      - Check TB: forecast_p50_daily exists with 365 rows for the target year
+      - Sanity: p50_energy > p90_energy > p95_energy in SERVER_SCOPE attributes
+      - Spot-check: sum(forecast_p50_daily for Jan) ≈ forecast_p50_monthly for Jan
+    """
+    if not asset_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="asset_id is required")
+
+    result = await run_pvalue_job_now(target_year=year, plant_ids=[asset_id])
+    return result

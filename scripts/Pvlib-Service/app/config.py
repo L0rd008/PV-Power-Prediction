@@ -134,6 +134,33 @@ class Settings(BaseSettings):
     """Minimum 1-min samples required by the today-partial path (default 30 — half an hour).
     Lower than the daily-job threshold (360) because we want partial values from mid-morning."""
 
+    # P-value job (P50/P90/P95 probabilistic forecast telemetry)
+    PVALUE_JOB_ENABLED: bool = False
+    """Master flag for the annual P-value batch job.
+    When true, registers a Jan-1 03:00 local-tz cron that fetches PVGIS multi-year
+    data and writes forecast_p50/p90/p95 daily + monthly telemetry to TB.
+    Default false — set true after smoke-testing /admin/run-pvalues-plant."""
+
+    PVGIS_START_YEAR: int = 2005
+    """First year of PVGIS-ERA5 historical data to fetch (inclusive).
+    ERA5 within PVGIS starts at 2005."""
+
+    PVGIS_END_YEAR: int = 2023
+    """Last year of PVGIS-ERA5 historical data to fetch (inclusive).
+    Keep at 2023 until PVGIS confirms a full 2024 ERA5 dataset."""
+
+    PVGIS_RADDATABASE: str = "PVGIS-ERA5"
+    """PVGIS radiation database to use.  'PVGIS-ERA5' is globally available.
+    Alternative: 'PVGIS-SARAH2' (higher resolution but not global)."""
+
+    PVGIS_REQUEST_TIMEOUT_S: int = 60
+    """HTTP timeout in seconds for each PVGIS API call.
+    PVGIS returns multi-year hourly data in one response — 60 s is generous."""
+
+    PVGIS_RETRY_MAX: int = 3
+    """Maximum retry attempts per PVGIS cell fetch on transient network errors.
+    Exponential back-off: 2 s, 4 s, 8 s between attempts."""
+
     @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
