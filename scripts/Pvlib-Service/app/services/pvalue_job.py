@@ -339,52 +339,85 @@ def _pvgis_call(lat: float, lon: float):
 # ── Weather DataFrame preparation ────────────────────────────────────────────
 
 def _prepare_weather(df_pvgis: pd.DataFrame, config: PlantConfig) -> pd.DataFrame:
-    """Rename PVGIS columns → pipeline canonical names; convert index to plant TZ.
+    """Rename/reconstruct PVGIS columns → pipeline canonical names.
 
-    PVGIS-ERA5 column names (components=True, outputformat='json'):
+    Handles two pvlib column name conventions:
+
+    pvlib < 0.11 (legacy PVGIS API column names):
       'G(h)'   — Global Horizontal Irradiance [W/m²]
-      'Gb(n)'  — Direct (Beam) Normal Irradiance [W/m²]
-      'Gd(h)'  — Diffuse Horizontal Irradiance [W/m²]
       'T2m'    — Air temperature at 2 m [°C]
       'WS10m'  — Wind speed at 10 m [m/s]
-      'Int'    — Radiation data flag (discard)
+
+    pvlib 0.11+ (standardized pvlib column names, angle=0 horizontal fetch):
+      'poa_direct'        — Beam irradiance on horizontal plane [W/m²]
+      'poa_sky_diffuse'   — Sky diffuse on horizontal [W/m²]
+      'poa_ground_diffuse'— Ground reflected on horizontal [W/m²]
+      → GHI = sum of all three (on horizontal surface POA = GHI)
+      'temp_air'          — Air temperature [°C]
+      'wind_speed'        — Wind speed [m/s]  (name unchanged in pipeline)
+
+    The fetch uses angle=0 (horizontal tilt) so no Perez transposition is
+    applied by PVGIS; we receive GHI-equivalent components and reassemble.
+    The pipeline then performs Perez transposition using the plant's actual
+    tilt/azimuth during compute_ac_power().
     """
-    col_map = {
-        "G(h)":   "ghi",
-        "T2m":    "air_temp",
-        "WS10m":  "wind_speed",
-    }
+    cols = set(df_pvgis.columns)
 
-    # Keep only columns we need; tolerate missing wind/temp (pipeline has defaults)
-    available = {pvgis_col: canon for pvgis_col, canon in col_map.items()
-                 if pvgis_col in df_pvgis.columns}
-
-    if "G(h)" not in available:
+    # ── GHI ──────────────────────────────────────────────────────────────────
+    if "G(h)" in cols:
+        # Legacy pvlib / raw PVGIS column name
+        ghi = df_pvgis["G(h)"].clip(lower=0.0)
+    elif all(c in cols for c in ("poa_direct", "poa_sky_diffuse", "poa_ground_diffuse")):
+        # pvlib 0.11+: horizontal fetch → sum of POA components = GHI
+        ghi = (
+            df_pvgis["poa_direct"].clip(lower=0.0)
+            + df_pvgis["poa_sky_diffuse"].clip(lower=0.0)
+            + df_pvgis["poa_ground_diffuse"].clip(lower=0.0)
+        )
+    elif "poa_direct" in cols and "poa_sky_diffuse" in cols:
+        # Partial match — best effort
+        poa_cols = [c for c in ("poa_direct", "poa_sky_diffuse", "poa_ground_diffuse") if c in cols]
+        ghi = df_pvgis[poa_cols].clip(lower=0.0).sum(axis=1)
+    else:
         raise ValueError(
-            f"PVGIS response missing 'G(h)' (GHI) column. "
-            f"Available columns: {list(df_pvgis.columns)}"
+            f"PVGIS response has no usable GHI column. "
+            f"Expected 'G(h)' or 'poa_direct'+'poa_sky_diffuse'+'poa_ground_diffuse'. "
+            f"Available: {sorted(cols)}"
         )
 
-    df = df_pvgis[list(available.keys())].rename(columns=available).copy()
+    # ── Air temperature ───────────────────────────────────────────────────────
+    if "temp_air" in cols:          # pvlib 0.11+
+        air_temp = df_pvgis["temp_air"].fillna(config.defaults.air_temp_c)
+    elif "T2m" in cols:             # legacy
+        air_temp = df_pvgis["T2m"].fillna(config.defaults.air_temp_c)
+    else:
+        log.warning("_prepare_weather: no air_temp column in PVGIS data — using default %.1f°C",
+                    config.defaults.air_temp_c)
+        air_temp = pd.Series(config.defaults.air_temp_c, index=df_pvgis.index)
 
-    # Ensure UTC-aware index, then convert to plant local timezone
+    # ── Wind speed ────────────────────────────────────────────────────────────
+    if "wind_speed" in cols:        # pvlib 0.11+ (already correct name)
+        wind_speed = df_pvgis["wind_speed"].fillna(config.defaults.wind_speed_ms)
+    elif "WS10m" in cols:           # legacy
+        wind_speed = df_pvgis["WS10m"].fillna(config.defaults.wind_speed_ms)
+    else:
+        log.warning("_prepare_weather: no wind_speed column in PVGIS data — using default %.1f m/s",
+                    config.defaults.wind_speed_ms)
+        wind_speed = pd.Series(config.defaults.wind_speed_ms, index=df_pvgis.index)
+
+    # ── Assemble canonical DataFrame ──────────────────────────────────────────
+    df = pd.DataFrame(
+        {"ghi": ghi, "air_temp": air_temp, "wind_speed": wind_speed},
+        index=df_pvgis.index,
+    )
+
+    # Ensure UTC-aware index then convert to plant local timezone
     if df.index.tzinfo is None:
         df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert(config.timezone)
 
-    # Clip irradiance sanity bounds matching the live pipeline
+    # Apply GHI sanity clip (matches live pipeline behaviour)
     df["ghi"] = df["ghi"].clip(lower=0.0, upper=config.station.sanity_max_ghi_wm2)
-
-    # Fill missing temp/wind with plant defaults (pipeline also does this, belt-and-braces)
-    if "air_temp" not in df.columns:
-        df["air_temp"] = config.defaults.air_temp_c
-    else:
-        df["air_temp"] = df["air_temp"].fillna(config.defaults.air_temp_c)
-
-    if "wind_speed" not in df.columns:
-        df["wind_speed"] = config.defaults.wind_speed_ms
-    else:
-        df["wind_speed"] = df["wind_speed"].fillna(config.defaults.wind_speed_ms)
 
     return df
 
