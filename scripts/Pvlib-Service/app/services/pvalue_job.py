@@ -290,10 +290,13 @@ async def _fetch_pvgis_cell(cell_lat: float, cell_lon: float) -> pd.DataFrame:
 
     for attempt in range(settings.PVGIS_RETRY_MAX):
         try:
-            df, _, _, _ = await loop.run_in_executor(
+            # pvlib 0.11+ returns (data, inputs, metadata) — 3 values.
+            # Earlier versions returned (data, months_optimal, inputs, metadata) — 4.
+            result = await loop.run_in_executor(
                 None,
                 lambda: _pvgis_call(cell_lat, cell_lon),
             )
+            df = result[0]   # always the DataFrame regardless of tuple length
             return df
         except Exception as exc:
             last_exc = exc
