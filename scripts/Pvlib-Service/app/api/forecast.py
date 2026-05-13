@@ -300,6 +300,74 @@ async def admin_run_daily(date: Optional[str] = Query(None)):
     }
 
 
+@router.post("/admin/run-daily-range")
+async def admin_run_daily_range(
+    start: Optional[str] = Query(None, description="Start date YYYY-MM-DD (inclusive). Defaults to yesterday."),
+    end:   Optional[str] = Query(None, description="End date YYYY-MM-DD (inclusive). Defaults to start."),
+):
+    """Backfill daily energy roll-up (expected + actual) for a date range.
+
+    Runs synchronously per day and returns a combined summary once all days complete.
+    Writes both total_generation_expected_kwh AND actual_daily_energy_kwh for each day.
+
+    Examples
+    --------
+    /admin/run-daily-range                              -> yesterday only
+    /admin/run-daily-range?start=2026-01-01             -> 2026-01-01 only
+    /admin/run-daily-range?start=2026-01-01&end=2026-05-12  -> 4-month backfill
+
+    Note: for plants with historical active_power data, this will compute
+    actual_daily_energy_kwh from that data. The pvlib expected values are also
+    recomputed from potential_power for the same days.
+    """
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+    from app.services.daily_job import run_daily_rollup
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    tz = ZoneInfo(settings.TZ_LOCAL)
+
+    def _parse(s: str) -> _date:
+        try:
+            return _date.fromisoformat(s)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {s!r}. Use YYYY-MM-DD.")
+
+    today_local = datetime.now(tz).date()
+    start_date  = _parse(start) if start else today_local - timedelta(days=1)
+    end_date    = _parse(end)   if end   else start_date
+
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end must be >= start")
+    if end_date >= today_local:
+        raise HTTPException(status_code=400, detail="end must be before today (only complete days can be backfilled)")
+
+    results = []
+    cursor  = start_date
+
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        while cursor <= end_date:
+            target_dt = datetime(cursor.year, cursor.month, cursor.day, tzinfo=tz) + timedelta(days=1)
+            try:
+                summary = await run_daily_rollup(tb, date=target_dt)
+                summary["date"] = str(cursor)
+            except Exception as exc:
+                summary = {"date": str(cursor), "status": "error", "error": str(exc)}
+            results.append(summary)
+            cursor += timedelta(days=1)
+
+    return {
+        "status": "done",
+        "days": len(results),
+        "plants_ok_total":     sum(r.get("ok",     0) for r in results),
+        "plants_failed_total": sum(r.get("failed", 0) for r in results),
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "results": results,
+    }
+
+
 @router.post("/admin/run-loss-rollup")
 async def admin_run_loss_rollup(
     start: Optional[str] = Query(None, description="Start date YYYY-MM-DD (inclusive). Defaults to yesterday."),

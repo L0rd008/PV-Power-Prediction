@@ -34,6 +34,10 @@ from app.services.forecast_service import (
 
 log = logging.getLogger(__name__)
 
+# Keys
+KEY_ACTUAL_DAILY_ENERGY  = "actual_daily_energy_kwh"   # real meter daily kWh (new)
+KEY_ACTUAL_METER_POWER   = "active_power"              # source timeseries (kW)
+
 # Minimum valid samples in a day to produce a real daily total.
 # 360 = 6 h × 60 min.  Below this, likely a partial day or major service outage.
 MIN_VALID_SAMPLES = 360
@@ -108,20 +112,31 @@ async def run_daily_rollup(
 
         plant_kwh[plant.id] = kwh
 
+        # ── Compute actual meter generation for the same day ──────────────
+        try:
+            actual_kwh = await _integrate_actual_day(
+                tb_client, plant.id, day_start_utc, day_end_utc
+            )
+        except Exception as exc:
+            log.warning("run_daily_rollup: actual integration failed for %s: %s", plant.id, exc)
+            actual_kwh = -1.0
+
         if kwh == -1.0:
             val = {"pvlib_data_source": "error:integration_failed"}
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0, -1.0, -1.0)
+            await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0, -1.0, -1.0,
+                                    actual_kwh=actual_kwh)
         else:
             month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
             year_start_utc = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
-            
-            monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-            yearly_history = await _get_historical_sum(tb_client, plant.id, year_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-            
-            monthly_kwh = monthly_history + kwh
-            yearly_kwh = yearly_history + kwh
 
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh)
+            monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            yearly_history  = await _get_historical_sum(tb_client, plant.id, year_start_utc,   day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+
+            monthly_kwh = monthly_history + kwh
+            yearly_kwh  = yearly_history  + kwh
+
+            await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh,
+                                    actual_kwh=actual_kwh)
             stats["ok"] += 1
 
     # Ancestor roll-up
@@ -136,13 +151,14 @@ async def run_daily_rollup(
             if cid in plant_kwh and plant_kwh[cid] >= 0
         ]
         total_kwh = sum(valid_kwhs) if valid_kwhs else -1.0
-        
+
         if total_kwh != -1.0:
             month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
-            year_start_utc = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
+            year_start_utc  = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
             monthly_history = await _get_historical_sum(tb_client, ancestor_id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-            yearly_history = await _get_historical_sum(tb_client, ancestor_id, year_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-            await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, total_kwh, monthly_history + total_kwh, yearly_history + total_kwh)
+            yearly_history  = await _get_historical_sum(tb_client, ancestor_id, year_start_utc,  day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
+            await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, total_kwh,
+                                    monthly_history + total_kwh, yearly_history + total_kwh)
         else:
             await _safe_write_daily(tb_client, ancestor_id, day_ts_ms, -1.0, -1.0, -1.0)
 
@@ -200,10 +216,61 @@ async def _integrate_plant_day(
     return round(kwh, 3)
 
 
+async def _integrate_actual_day(
+    tb_client,
+    plant_id: str,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> float:
+    """Read actual active_power (kW) for one plant over the day, integrate, return kWh.
+
+    Returns -1.0 if data is insufficient (<MIN_VALID_SAMPLES valid records).
+    Unlike expected, nighttime -1 sentinels do not exist for active_power;
+    zero readings during night are real and are excluded via the 05:00-19:00 filter.
+    """
+    raw = await tb_client.get_timeseries(
+        "ASSET", plant_id,
+        [KEY_ACTUAL_METER_POWER],
+        start=day_start_utc,
+        end=day_end_utc,
+        limit=100_000,
+    )
+
+    records = raw.get(KEY_ACTUAL_METER_POWER, [])
+    if not records:
+        log.info("_integrate_actual_day: no active_power records for %s", plant_id)
+        return -1.0
+
+    import pandas as pd
+    series = pd.Series({
+        pd.Timestamp(r["ts"], unit="ms", tz="UTC"): float(r["value"])
+        for r in records
+        if float(r["value"]) >= 0   # exclude negative sentinel / bad readings
+    })
+
+    # Filter to 05:00-19:00 local time (real solar window)
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    series_local = series.index.tz_convert(tz)
+    series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
+
+    if len(series) < MIN_VALID_SAMPLES:
+        log.warning(
+            "_integrate_actual_day: only %d samples for %s (min %d) — writing -1",
+            len(series), plant_id, MIN_VALID_SAMPLES,
+        )
+        return -1.0
+
+    # For 1-minute cadence: integral = sum(kW) / 60  (kWh)
+    kwh = float(series.sum()) / 60.0
+    return round(kwh, 3)
+
+
 async def _safe_write_daily(
-    tb_client, entity_id: str, ts_ms: int, kwh: float, monthly_kwh: float = -1.0, yearly_kwh: float = -1.0
+    tb_client, entity_id: str, ts_ms: int,
+    kwh: float, monthly_kwh: float = -1.0, yearly_kwh: float = -1.0,
+    actual_kwh: float = -1.0,
 ) -> None:
-    """Write daily energy keys; best-effort (logs on failure)."""
+    """Write daily energy keys (expected + actual); best-effort."""
     if kwh == -1.0:
         values = {
             KEY_DAILY_ENERGY_EXPECTED: -1,
@@ -217,10 +284,15 @@ async def _safe_write_daily(
         values = {
             KEY_DAILY_ENERGY_EXPECTED: round(kwh, 3),
             "total_generation_expected_monthly_kwh": round(monthly_kwh, 3) if monthly_kwh >= 0 else -1,
-            "total_generation_expected_yearly_kwh": round(yearly_kwh, 3) if yearly_kwh >= 0 else -1,
+            "total_generation_expected_yearly_kwh":  round(yearly_kwh,  3) if yearly_kwh  >= 0 else -1,
             KEY_PVLIB_DAILY_ENERGY: round(kwh, 3),
             KEY_MODEL_VERSION: MODEL_VERSION,
         }
+    # Always include actual if we have it (independent of expected)
+    if actual_kwh >= 0:
+        values[KEY_ACTUAL_DAILY_ENERGY] = round(actual_kwh, 3)
+    else:
+        values[KEY_ACTUAL_DAILY_ENERGY] = -1
     try:
         await tb_client.post_telemetry("ASSET", entity_id, [{"ts": ts_ms, "values": values}])
     except Exception as exc:
