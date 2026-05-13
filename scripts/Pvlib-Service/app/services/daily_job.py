@@ -199,6 +199,10 @@ async def _integrate_plant_day(
         if float(r["value"]) >= 0  # exclude -1 sentinels
     })
 
+    if series.empty:
+        log.info("_integrate_plant_day: all records are sentinels for %s", plant_id)
+        return -1.0
+
     # Filter to 05:00-19:00 local time
     tz = ZoneInfo(settings.TZ_LOCAL)
     series_local = series.index.tz_convert(tz)
@@ -247,6 +251,10 @@ async def _integrate_actual_day(
         for r in records
         if float(r["value"]) >= 0   # exclude negative sentinel / bad readings
     })
+
+    if series.empty:
+        log.info("_integrate_actual_day: all records are negative/zero for %s", plant_id)
+        return -1.0
 
     # Filter to 05:00-19:00 local time (real solar window)
     tz = ZoneInfo(settings.TZ_LOCAL)
