@@ -155,6 +155,7 @@ The `pvlib_*` ops aliases (`active_power_pvlib_kw`, `pvlib_daily_energy_kwh`) ma
 |---|---|---|
 | Physics config | `config/kebithigollewa_pvlib_config.json` | Template for plant attributes; values stored in TB SERVER_SCOPE |
 | Validation script | `scripts/shared/validate_pvlib.py` | Phase 1 accuracy benchmark vs actual `EnergyMeter_active_power` |
+| Unit migration script | `scripts/shared/set_active_power_unit.py` | Gap 9: one-shot idempotent script to set `active_power_unit` on all known plants |
 | V5 Curtailment widget | `Widgets/Grid & Losses/Curtailment vs Potential Power/V5 TB Timeseries Widget` | Gap 8: natively fetches `potential_power` as Dataset 0 (dashed line). Falls back to half-sine model when no TB data. Inline ⚙ settings: **Potential Power Key** (default `potential_power`). |
 | Loss Attribution widget | `Widgets/Grid & Losses/Loss Attribution` | Datasource-agnostic — wire the TB datasource key to `potential_power` (instantaneous) or `total_generation_expected_kwh` (daily energy mode). No code change required. |
 | Forecast vs Actual Energy | `Widgets/Forecasts & Risk/Forecast vs Actual Energy` | Gap 8: fetches `total_generation_expected_kwh` as Dataset 5 (green dotted "Physics Expected" line). Setting: **pvlibExpectedKey** (default `total_generation_expected_kwh`). kWh auto-converted to MWh for display. |
@@ -208,36 +209,6 @@ Written to **SERVER_SCOPE** on each plant asset and rolled up to `isPlantAgg` an
 
 **Reading in widget**: `fetchAttributesWithFallback(entity, [attr_name])` — reads SERVER_SCOPE first, then SHARED_SCOPE. The widget uses the `lossLifetimeAttrPrefix` setting (default `"loss_"`) to compose the six attribute names.
 
-- A plant appearing under both parent A and parent B contributes its output to both parents independently (correct for independent regional totals).
-
-If you need a non-double-counted global total, sum `potential_power` across leaf plants only (not aggregation assets).
-
----
-
-## Key Retirement Policy
-
-Before removing any key listed above:
-1. Search `M:\Documents\Projects\MAGICBIT\Widgets\` for widget code referencing that key.
-2. Add a 90-day deprecation notice to this document.
-3. Remove after confirming zero dashboard usage.
-
-The `pvlib_*` ops aliases (`active_power_pvlib_kw`, `pvlib_daily_energy_kwh`) may be retired after the primary keys (`potential_power`, `total_generation_expected_kwh`) have been stable for 90 days in production.
-
----
-
-## Related Systems
-
-| System | Location | Key interaction |
-|---|---|---|
-| Physics config | `config/kebithigollewa_pvlib_config.json` | Template for plant attributes; values stored in TB SERVER_SCOPE |
-| Validation script | `scripts/shared/validate_pvlib.py` | Phase 1 accuracy benchmark vs actual `EnergyMeter_active_power` |
-| Unit migration script | `scripts/shared/set_active_power_unit.py` | Gap 9: one-shot idempotent script to set `active_power_unit` on all known plants |
-| V5 Curtailment widget | `Widgets/Grid & Losses/Curtailment vs Potential Power/V5 TB Timeseries Widget` | Gap 8: natively fetches `potential_power` as Dataset 0 (dashed line). Falls back to half-sine model when no TB data. Inline ⚙ settings: **Potential Power Key** (default `potential_power`). |
-| Loss Attribution widget | `Widgets/Grid & Losses/Loss Attribution` | Datasource-agnostic — wire the TB datasource key to `potential_power` (instantaneous) or `total_generation_expected_kwh` (daily energy mode). No code change required. |
-| Forecast vs Actual Energy | `Widgets/Forecasts & Risk/Forecast vs Actual Energy` | Gap 8: fetches `total_generation_expected_kwh` as Dataset 5 (green dotted "Physics Expected" line). Setting: **pvlibExpectedKey** (default `total_generation_expected_kwh`). kWh auto-converted to MWh for display. |
-| Portfolio Status Map | `Widgets/Portfolio/Portfolio Site Status Map` | Uses `isPlant`/`isPlantAgg` attributes for hierarchy — no telemetry keys, unaffected. |
-
----
 
 ## P-Value Forecast Keys
 
