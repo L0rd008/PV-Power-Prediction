@@ -1,7 +1,7 @@
 """
 P-value probabilistic forecast job — P50 / P90 / P95 daily + monthly telemetry.
 
-Algorithm (Phase 1 — monthly percentiles, flat daily within each month):
+Algorithm (Phase 2 — per-calendar-day percentiles):
   1. Discover pvlib-enabled plants via tb_client.discover_plants().
   2. Deduplicate by ERA5 grid cell (lat/lon rounded to nearest 0.25°).
      ~1000 Sri Lanka plants → ~70 unique cells → ~70 PVGIS API calls.
@@ -13,22 +13,21 @@ Algorithm (Phase 1 — monthly percentiles, flat daily within each month):
        c. Integrate daily kWh: resample('D').sum()
           CRITICAL: hourly cadence → each kW row = 1 kWh; do NOT divide by 60.
        d. Concatenate all years → full daily series.
-  5. Monthly percentiles:
-       monthly_total_by_year = daily.resample('ME').sum()   (19 values per month)
-       P50 = quantile(0.50), P90 = quantile(0.10), P95 = quantile(0.05)
-       Note: with n=19, P95 ≈ minimum month on record — conservative but acceptable.
-  6. Annual P50/P90/P95: percentile of full-year totals (19 values — true annual stat).
-  7. Write to ThingsBoard:
+  5. Per-calendar-day percentiles (Phase 2):
+       Group daily series by (month, day_of_month) across all 19 years.
+       Each group has up to 19 values → P50/P90/P95 per calendar day.
+       Result: 365 unique daily P values (intra-month variation captured).
+       Note: with n=19, P95=quantile(0.05) ≈ minimum value — conservative but acceptable
+       for risk signalling. Phase 3 upgrade: extend to 30-year ERA5 dataset.
+  6. Monthly P values: sum of per-day P values within each month (consistent totals).
+  7. Annual P50/P90/P95: percentile of full-year totals (19 values — true annual stat).
+  8. Write to ThingsBoard:
        Timeseries (365 daily rows, ts = local midnight of target year):
          forecast_p50_daily, forecast_p90_daily, forecast_p95_daily  [MWh]
        Timeseries (12 monthly rows, ts = 1st-of-month midnight of target year):
          forecast_p50_monthly, forecast_p90_monthly, forecast_p95_monthly [MWh]
        SERVER_SCOPE attributes:
          p50_energy, p90_energy, p95_energy  [kWh — annual total]
-
-Phase 2 upgrade path (no telemetry schema change):
-  Replace step 5 with per-calendar-day groupby (365 groups, 19 values each)
-  for true intra-month daily percentiles. Same keys, same TB writes, higher accuracy.
 
 PVGIS column mapping:
   PVGIS 'G(h)'   → pipeline 'ghi'        [W/m²]
@@ -68,7 +67,7 @@ ATTR_P50_ENERGY   = "p50_energy"              # kWh — annual P50 (SERVER_SCOPE
 ATTR_P90_ENERGY   = "p90_energy"              # kWh — annual P90
 ATTR_P95_ENERGY   = "p95_energy"              # kWh — annual P95
 
-PVALUE_MODEL_VER  = "pvalue-monthly-v1"       # bump when algorithm changes
+PVALUE_MODEL_VER  = "pvalue-daily-v2"          # Phase 2: per-calendar-day percentiles
 
 # ERA5 grid resolution — plants within the same cell share a PVGIS fetch
 ERA5_GRID_DEG = 0.25
@@ -222,8 +221,11 @@ async def _process_plant(
     if all_daily_kwh.empty:
         raise RuntimeError("simulation produced no daily data across all years")
 
-    # ── Monthly percentiles ───────────────────────────────────────────────────
-    monthly_p_kwh = _monthly_percentiles(all_daily_kwh)
+    # ── Per-calendar-day percentiles (Phase 2) ────────────────────────────────
+    daily_p_kwh = _daily_percentiles(all_daily_kwh)
+
+    # ── Monthly P values: sum of per-day P values within each month ───────────
+    monthly_p_kwh = _monthly_from_daily(daily_p_kwh, target_year)
 
     # ── Annual true percentiles (from full-year totals) ───────────────────────
     annual_by_year = all_daily_kwh.resample("YE").sum()
@@ -232,10 +234,11 @@ async def _process_plant(
     p95_annual_kwh = float(np.quantile(annual_by_year.values, 0.05))
 
     log.info(
-        "_process_plant [%s]: annual P50=%.0f P90=%.0f P95=%.0f kWh | years=%d",
+        "_process_plant [%s]: annual P50=%.0f P90=%.0f P95=%.0f kWh | years=%d | daily_groups=%d",
         config.plant_name,
         p50_annual_kwh, p90_annual_kwh, p95_annual_kwh,
         len(annual_by_year),
+        len(daily_p_kwh),
     )
 
     # Sanity: P50 > P90 > P95 (monotonicity guard)
@@ -247,7 +250,7 @@ async def _process_plant(
         )
 
     # ── Build TB records ──────────────────────────────────────────────────────
-    daily_records   = _build_daily_records(monthly_p_kwh, target_year, tz)
+    daily_records   = _build_daily_records(daily_p_kwh, target_year, tz)
     monthly_records = _build_monthly_records(monthly_p_kwh, target_year, tz)
 
     annual_attrs = {
@@ -476,82 +479,139 @@ def _simulate_all_years(
 
 # ── Percentile computation ───────────────────────────────────────────────────
 
-def _monthly_percentiles(
+def _daily_percentiles(
     all_daily_kwh: pd.Series,
-) -> Dict[int, Dict[float, float]]:
-    """Compute monthly P50/P90/P95 from multi-year daily series.
+) -> Dict[Tuple[int, int], Dict[float, float]]:
+    """Phase 2 — per-calendar-day P50/P90/P95 from multi-year daily series.
 
-    Groups daily values by calendar month across all years → monthly totals per year
-    (e.g., all 19 Januarys, all 19 Februarys, …) → percentile of those 19 values.
+    Groups daily values by (month, day_of_month) across all historical years.
+    Each group has up to n=19 values (one per simulated year).
+    Percentile of those n values = P-value for that calendar day.
+
+    Returns
+    -------
+    dict
+        {(month, day): {0.50: kwh, 0.10: kwh, 0.05: kwh}}
+        Values = daily energy in kWh.
+    """
+    result: Dict[Tuple[int, int], Dict[float, float]] = {}
+
+    # Build a DataFrame with month and day columns for grouping
+    df = pd.DataFrame({"kwh": all_daily_kwh})
+    df["month"] = df.index.month
+    df["day"]   = df.index.day
+
+    for (month, day), group in df.groupby(["month", "day"]):
+        vals = group["kwh"].values
+        if len(vals) == 0:
+            log.warning("_daily_percentiles: no data for month=%d day=%d", month, day)
+            result[(month, day)] = {0.50: 0.0, 0.10: 0.0, 0.05: 0.0}
+            continue
+
+        result[(month, day)] = {
+            0.50: float(np.quantile(vals, 0.50)),
+            0.10: float(np.quantile(vals, 0.10)),
+            0.05: float(np.quantile(vals, 0.05)),
+        }
+
+        log.debug(
+            "_daily_percentiles: %02d-%02d — P50=%.1f P90=%.1f P95=%.1f kWh (n=%d)",
+            month, day,
+            result[(month, day)][0.50],
+            result[(month, day)][0.10],
+            result[(month, day)][0.05],
+            len(vals),
+        )
+
+    log.info(
+        "_daily_percentiles: computed %d calendar-day groups across %d years",
+        len(result),
+        len(df["kwh"].resample("YE").sum()) if hasattr(all_daily_kwh, 'resample') else 0,
+    )
+    return result
+
+
+def _monthly_from_daily(
+    daily_p_kwh: Dict[Tuple[int, int], Dict[float, float]],
+    target_year: int,
+) -> Dict[int, Dict[float, float]]:
+    """Derive monthly P values by summing per-day P values within each calendar month.
+
+    Uses the actual days-in-month for target_year (handles leap years and Feb 29).
+    Monotonicity is maintained because sum of P-values at same quantile is monotone.
 
     Returns
     -------
     dict
         {month (1–12): {0.50: kwh, 0.10: kwh, 0.05: kwh}}
-        Values = total monthly energy in kWh.
     """
-    # Resample to month-end frequency → 19 × 12 = ~228 monthly totals
-    monthly_by_year = all_daily_kwh.resample("ME").sum()
-
     result: Dict[int, Dict[float, float]] = {}
     for month in range(1, 13):
-        mask = monthly_by_year.index.month == month
-        month_values = monthly_by_year[mask].values
+        _, days_in_month = calendar.monthrange(target_year, month)
+        p50_sum = p90_sum = p95_sum = 0.0
+        for day in range(1, days_in_month + 1):
+            key = (month, day)
+            if key not in daily_p_kwh:
+                # Feb 29 in non-leap years: use Feb 28 value as best estimate
+                fallback = (month, days_in_month)
+                if fallback in daily_p_kwh:
+                    pvals = daily_p_kwh[fallback]
+                    log.debug("_monthly_from_daily: %02d-%02d missing — using %02d-%02d",
+                              month, day, month, days_in_month)
+                else:
+                    log.warning("_monthly_from_daily: no data for %02d-%02d — using 0", month, day)
+                    continue
+            else:
+                pvals = daily_p_kwh[key]
+            p50_sum += pvals[0.50]
+            p90_sum += pvals[0.10]
+            p95_sum += pvals[0.05]
 
-        if len(month_values) == 0:
-            log.warning("_monthly_percentiles: no data for month %d", month)
-            result[month] = {0.50: 0.0, 0.10: 0.0, 0.05: 0.0}
-            continue
-
-        result[month] = {
-            0.50: float(np.quantile(month_values, 0.50)),
-            0.10: float(np.quantile(month_values, 0.10)),
-            0.05: float(np.quantile(month_values, 0.05)),
-        }
-
+        result[month] = {0.50: p50_sum, 0.10: p90_sum, 0.05: p95_sum}
         log.debug(
-            "_monthly_percentiles: month %02d — P50=%.0f P90=%.0f P95=%.0f kWh (n=%d)",
-            month,
-            result[month][0.50],
-            result[month][0.10],
-            result[month][0.05],
-            len(month_values),
+            "_monthly_from_daily: month %02d — P50=%.0f P90=%.0f P95=%.0f kWh",
+            month, p50_sum, p90_sum, p95_sum,
         )
-
     return result
 
 
 # ── TB record builders ───────────────────────────────────────────────────────
 
 def _build_daily_records(
-    monthly_p_kwh: Dict[int, Dict[float, float]],
+    daily_p_kwh: Dict[Tuple[int, int], Dict[float, float]],
     target_year: int,
     tz: ZoneInfo,
 ) -> List[dict]:
     """Build 365/366 daily TB timeseries records for the target year.
 
-    Each day gets a flat P value = monthly_P / days_in_month.
+    Phase 2: each day gets its own P value from per-calendar-day percentiles.
     ts = local midnight of that calendar day (ms epoch).
     Values written in MWh (÷ 1000) — widget expects MWh.
     """
     records: List[dict] = []
     for month in range(1, 13):
         _, days_in_month = calendar.monthrange(target_year, month)
-        pvals = monthly_p_kwh[month]
-
-        p50_mwh_per_day = pvals[0.50] / 1000.0 / days_in_month
-        p90_mwh_per_day = pvals[0.10] / 1000.0 / days_in_month
-        p95_mwh_per_day = pvals[0.05] / 1000.0 / days_in_month
-
         for day in range(1, days_in_month + 1):
+            key = (month, day)
+            if key not in daily_p_kwh:
+                # Feb 29 in non-leap target year (target_year is always 365-day or 366-day)
+                # Since target_year is real, monthrange is authoritative — no missing days.
+                # But if ERA5 data never had Feb 29 (non-leap source years), use Feb 28.
+                fallback = (month, days_in_month - 1) if day == 29 else (month, day)
+                pvals = daily_p_kwh.get(fallback, {0.50: 0.0, 0.10: 0.0, 0.05: 0.0})
+                log.warning("_build_daily_records: no per-day data for %02d-%02d — using fallback",
+                            month, day)
+            else:
+                pvals = daily_p_kwh[key]
+
             ts_local = datetime(target_year, month, day, 0, 0, 0, tzinfo=tz)
             ts_ms = int(ts_local.timestamp() * 1000)
             records.append({
                 "ts": ts_ms,
                 "values": {
-                    KEY_P50_DAILY: round(p50_mwh_per_day, 4),
-                    KEY_P90_DAILY: round(p90_mwh_per_day, 4),
-                    KEY_P95_DAILY: round(p95_mwh_per_day, 4),
+                    KEY_P50_DAILY: round(pvals[0.50] / 1000.0, 4),
+                    KEY_P90_DAILY: round(pvals[0.10] / 1000.0, 4),
+                    KEY_P95_DAILY: round(pvals[0.05] / 1000.0, 4),
                 },
             })
 

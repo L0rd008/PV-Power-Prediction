@@ -1,6 +1,9 @@
 # Pvlib-Service — Telemetry Key Contract
 
-*Version 1.1 — 2026-05-12. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+*Version 1.2 — 2026-05-13. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+
+> **v1.2 changes**: `pvalue_job.py` upgraded to `pvalue-daily-v2` (per-calendar-day P50/P90/P95 percentiles — Phase 2). FDI widget `actualDailyKey` corrected to `total_generation` (real meter) from `total_generation_expected_kwh`. FDI widget now uses generic `forecastDailyKey` for 3-instance (P50/P90/P95) dashboard pattern. FvA widget default `viewMode` changed to `monthly` (full calendar year, 12-bar view with all 3 P bands + future months).
+
 
 ---
 
