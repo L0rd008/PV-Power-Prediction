@@ -40,9 +40,11 @@ KEY_ACTUAL_METER_POWER   = "active_power"              # source timeseries (kW)
 KEY_ACTUAL_WEEKLY_ENERGY = "actual_weekly_energy_kwh"  # real meter weekly rolling sum
 KEY_ACTUAL_MTD_ENERGY    = "actual_mtd_energy_kwh"     # real meter MTD rolling sum
 
-# Minimum valid samples in a day to produce a real daily total.
-# 360 = 6 h × 60 min.  Below this, likely a partial day or major service outage.
-MIN_VALID_SAMPLES = 360
+# Minimum solar-generation coverage required to produce a valid daily total.
+# Replaces sample-count guard — works correctly for any sampling cadence
+# (1-min, 5-min, 15-min, etc.).
+MIN_COVERAGE_HOURS = 5.0    # reject days with < 5 h of valid solar data
+MAX_SAMPLE_GAP_H   = 0.5   # ignore gaps > 30 min (treat as outages/dropouts)
 
 
 async def run_daily_rollup(
@@ -240,16 +242,45 @@ async def _integrate_plant_day(
     series_local = series.index.tz_convert(tz)
     series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
 
-    if len(series) < MIN_VALID_SAMPLES:
+    # Time-weighted integration — correct for any sampling cadence (1-min, 15-min, etc.)
+    kwh, coverage_h = _time_weighted_kwh(series)
+    if coverage_h < MIN_COVERAGE_HOURS:
         log.warning(
-            "_integrate_plant_day: only %d valid samples for %s (min %d) — writing -1",
-            len(series), plant_id, MIN_VALID_SAMPLES,
+            "_integrate_plant_day: only %.1f h coverage for %s (min %.1f h) — writing -1",
+            coverage_h, plant_id, MIN_COVERAGE_HOURS,
         )
         return -1.0
 
-    # For 1-minute cadence: integral = sum(kW) / 60  (kWh)
-    kwh = float(series.sum()) / 60.0
+    log.debug("_integrate_plant_day: %s → %.1f kWh (coverage=%.1f h)", plant_id, kwh, coverage_h)
     return round(kwh, 3)
+
+
+def _time_weighted_kwh(series) -> tuple:
+    """Cadence-agnostic trapezoidal integration of a kW time-series.
+
+    Works for any sampling interval (1-min, 5-min, 15-min, etc.).
+    Gaps > MAX_SAMPLE_GAP_H (30 min) are skipped — treated as outages.
+
+    Returns
+    -------
+    (kwh, coverage_hours)
+        kwh          : total energy in kWh
+        coverage_hours: total time covered (excluding large gaps)
+    """
+    if len(series) < 2:
+        return 0.0, 0.0
+
+    kwh = 0.0
+    coverage_h = 0.0
+    for i in range(1, len(series)):
+        dt_h = (series.index[i] - series.index[i - 1]).total_seconds() / 3600.0
+        if dt_h > MAX_SAMPLE_GAP_H:
+            continue  # skip outage gaps
+        avg_kw = 0.5 * (series.iloc[i] + series.iloc[i - 1])  # trapezoid rule
+        kwh        += avg_kw * dt_h
+        coverage_h += dt_h
+
+    return kwh, coverage_h
 
 
 async def _integrate_actual_day(
@@ -260,9 +291,8 @@ async def _integrate_actual_day(
 ) -> float:
     """Read actual active_power (kW) for one plant over the day, integrate, return kWh.
 
-    Returns -1.0 if data is insufficient (<MIN_VALID_SAMPLES valid records).
-    Unlike expected, nighttime -1 sentinels do not exist for active_power;
-    zero readings during night are real and are excluded via the 05:00-19:00 filter.
+    Uses time-weighted (trapezoidal) integration — correct for any sampling cadence.
+    Returns -1.0 if solar-hour coverage is < MIN_COVERAGE_HOURS.
     """
     raw = await tb_client.get_timeseries(
         "ASSET", plant_id,
@@ -288,20 +318,21 @@ async def _integrate_actual_day(
         log.info("_integrate_actual_day: all records are negative/zero for %s", plant_id)
         return -1.0
 
-    # Filter to 05:00-19:00 local time (real solar window)
+    # Filter to 05:00-19:00 local solar window
     tz = ZoneInfo(settings.TZ_LOCAL)
     series_local = series.index.tz_convert(tz)
     series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
 
-    if len(series) < MIN_VALID_SAMPLES:
+    # Time-weighted integration — handles 1-min, 5-min, 15-min cadences equally
+    kwh, coverage_h = _time_weighted_kwh(series)
+    if coverage_h < MIN_COVERAGE_HOURS:
         log.warning(
-            "_integrate_actual_day: only %d samples for %s (min %d) — writing -1",
-            len(series), plant_id, MIN_VALID_SAMPLES,
+            "_integrate_actual_day: only %.1f h coverage for %s (min %.1f h) — writing -1",
+            coverage_h, plant_id, MIN_COVERAGE_HOURS,
         )
         return -1.0
 
-    # For 1-minute cadence: integral = sum(kW) / 60  (kWh)
-    kwh = float(series.sum()) / 60.0
+    log.debug("_integrate_actual_day: %s → %.1f kWh (coverage=%.1f h)", plant_id, kwh, coverage_h)
     return round(kwh, 3)
 
 
