@@ -123,40 +123,53 @@ async def run_daily_rollup(
             log.warning("run_daily_rollup: actual integration failed for %s: %s", plant.id, exc)
             actual_kwh = -1.0
 
+        # ── Compute date helpers (needed by both branches) ───────────────────
+        year_start_local = day_start_local.replace(
+            month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
+        year_start_utc  = year_start_local.astimezone(timezone.utc)
+
+        doy                = (day_start_local - year_start_local).days + 1
+        bucket_idx         = (doy - 1) // 7
+        bucket_start_local = year_start_local + timedelta(days=bucket_idx * 7)
+        week_start_utc     = bucket_start_local.astimezone(timezone.utc)
+        week_ts_ms         = int(bucket_start_local.timestamp() * 1000)
+
+        # ── Actual MTD / weekly — always computed when meter data is valid ───
+        # Decoupled from pvlib expected: plants without potential_power data
+        # still get actual_mtd_energy_kwh written for FDI widget accuracy.
+        actual_mtd_kwh    = -1.0
+        actual_weekly_kwh = -1.0
+        if actual_kwh >= 0:
+            actual_monthly_history = await _get_historical_sum(
+                tb_client, plant.id, month_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY
+            )
+            actual_weekly_history = await _get_historical_sum(
+                tb_client, plant.id, week_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY
+            )
+            actual_mtd_kwh    = actual_monthly_history + actual_kwh
+            actual_weekly_kwh = actual_weekly_history  + actual_kwh
+
         if kwh == -1.0:
-            val = {"pvlib_data_source": "error:integration_failed"}
             await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0, -1.0, -1.0,
-                                    actual_kwh=actual_kwh)
+                                    actual_kwh=actual_kwh, actual_mtd_kwh=actual_mtd_kwh,
+                                    actual_weekly_kwh=actual_weekly_kwh, week_ts_ms=week_ts_ms)
         else:
-            month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
-            year_start_local = day_start_local.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-            year_start_utc = year_start_local.astimezone(timezone.utc)
-
-            # Determine the start of the current 7-day bucket
-            doy = (day_start_local - year_start_local).days + 1
-            bucket_idx = (doy - 1) // 7
-            bucket_start_local = year_start_local + timedelta(days=bucket_idx * 7)
-            week_start_utc = bucket_start_local.astimezone(timezone.utc)
-            week_ts_ms = int(bucket_start_local.timestamp() * 1000)
-
-            monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-            yearly_history  = await _get_historical_sum(tb_client, plant.id, year_start_utc,   day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
-
+            monthly_history = await _get_historical_sum(
+                tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED
+            )
+            yearly_history  = await _get_historical_sum(
+                tb_client, plant.id, year_start_utc,  day_start_utc, KEY_DAILY_ENERGY_EXPECTED
+            )
             monthly_kwh = monthly_history + kwh
             yearly_kwh  = yearly_history  + kwh
-            
-            actual_mtd_kwh = -1.0
-            actual_weekly_kwh = -1.0
-            if actual_kwh >= 0:
-                actual_monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY)
-                actual_weekly_history = await _get_historical_sum(tb_client, plant.id, week_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY)
-                actual_mtd_kwh = actual_monthly_history + actual_kwh
-                actual_weekly_kwh = actual_weekly_history + actual_kwh
 
             await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh,
                                     actual_kwh=actual_kwh, actual_mtd_kwh=actual_mtd_kwh,
                                     actual_weekly_kwh=actual_weekly_kwh, week_ts_ms=week_ts_ms)
             stats["ok"] += 1
+
 
     # Ancestor roll-up
     ancestor_children: Dict[str, Set[str]] = {}
