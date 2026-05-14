@@ -259,6 +259,54 @@ async def run_pvalue_job_now(
         return {"status": "error", "error": str(exc)}
 
 
+async def run_pvalue_newplants_now() -> dict:
+    """Detect new plants missing P-value telemetry and auto-trigger generation.
+
+    Runs daily at 01:00 local. Discovers pvlib-enabled plants, checks which
+    ones lack the `pvalue_updated_at` SERVER_SCOPE attribute, and triggers
+    `run_pvalue_job(plant_ids=[...])` for those plants only.
+    """
+    if not settings.PVALUE_JOB_ENABLED:
+        return {"status": "disabled"}
+
+    from app.services.thingsboard_client import ThingsBoardClient
+
+    effective_client = _tb_client
+    try:
+        if effective_client is None:
+            return {"status": "error", "error": "no_tb_client"}
+
+        plants, _ = await effective_client.discover_plants(settings.root_asset_ids)
+        if not plants:
+            return {"status": "no_plants"}
+
+        missing_ids = []
+        for plant in plants:
+            try:
+                attrs = await effective_client.get_asset_attributes(plant.id)
+                if not attrs or not attrs.get("pvalue_updated_at"):
+                    missing_ids.append(plant.id)
+            except Exception as exc:
+                log.warning("run_pvalue_newplants_now: attr check failed for %s: %s", plant.id, exc)
+                missing_ids.append(plant.id)
+
+        if not missing_ids:
+            log.info("run_pvalue_newplants_now: all %d plants have P-values", len(plants))
+            return {"status": "ok", "plants_checked": len(plants), "new_plants": 0}
+
+        log.info("run_pvalue_newplants_now: %d/%d plants missing P-values — triggering",
+                 len(missing_ids), len(plants))
+
+        from app.services.pvalue_job import run_pvalue_job
+        result = await run_pvalue_job(effective_client, plant_ids=missing_ids)
+        result["new_plants"] = len(missing_ids)
+        return result
+
+    except Exception as exc:
+        log.exception("run_pvalue_newplants_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 def start_scheduler(tb_client=None) -> None:
     """Start APScheduler if SCHEDULER_ENABLED is true.
 
@@ -374,6 +422,20 @@ def start_scheduler(tb_client=None) -> None:
             replace_existing=True,
         )
         log.info("scheduler: P-value cron registered at Jan-1 03:00 %s", settings.TZ_LOCAL)
+
+        # New-plant auto-detection: daily at 01:00 local.
+        # Discovers plants missing `pvalue_updated_at` and triggers P-value generation.
+        scheduler.add_job(
+            run_pvalue_newplants_now,
+            trigger="cron",
+            hour=1,
+            minute=0,
+            misfire_grace_time=3600,
+            max_instances=1,
+            id="pvlib_pvalue_newplants",
+            replace_existing=True,
+        )
+        log.info("scheduler: P-value new-plant detection cron registered at 01:00 %s", settings.TZ_LOCAL)
     else:
         log.info("scheduler: P-value cron NOT registered (PVALUE_JOB_ENABLED=false)")
 

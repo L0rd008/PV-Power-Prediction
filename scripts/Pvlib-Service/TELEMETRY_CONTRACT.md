@@ -236,6 +236,26 @@ Written as 12 rows per plant per year. Timestamp = local midnight of 1st of each
 | `forecast_p90_monthly` | MWh | P90 expected monthly energy. | Forecast vs Actual Energy (risk threshold) |
 | `forecast_p95_monthly` | MWh | P95 expected monthly energy. | Forecast vs Actual Energy (outer risk band) |
 
+### Weekly Timeseries
+
+Written as 52 rows per plant per year. Timestamp = local midnight of each week's start (7-day buckets from Jan 1).
+
+| Key | Unit | Description | Widget |
+|---|---|---|---|
+| `forecast_p50_weekly` | MWh | Median expected weekly energy. Sum of 7 daily P50 values. | Forecast vs Actual Energy (YTD weekly default mode — P50 line) |
+| `forecast_p90_weekly` | MWh | P90 expected weekly energy. Sum of 7 daily P90 values. | Forecast vs Actual Energy (P90 band) |
+| `forecast_p95_weekly` | MWh | P95 expected weekly energy. Sum of 7 daily P95 values. | Forecast vs Actual Energy (P95 outer band) |
+
+### MTD Rolling Timeseries
+
+Written as 365 rows per plant per year. Each row = cumulative P-value sum from 1st of month through that day.
+
+| Key | Unit | Description | Widget |
+|---|---|---|---|
+| `forecast_p50_mtd` | MWh | Cumulative P50 month-to-date expected energy. | FDI card (P50 MTD instance) |
+| `forecast_p90_mtd` | MWh | Cumulative P90 month-to-date expected energy. | FDI card (P90 MTD instance) |
+| `forecast_p95_mtd` | MWh | Cumulative P95 month-to-date expected energy. | FDI card (P95 MTD instance) |
+
 ### Annual SERVER\_SCOPE Attributes
 
 Written once per plant per run. These supersede any manually set values.
