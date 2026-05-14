@@ -37,6 +37,8 @@ log = logging.getLogger(__name__)
 # Keys
 KEY_ACTUAL_DAILY_ENERGY  = "actual_daily_energy_kwh"   # real meter daily kWh (new)
 KEY_ACTUAL_METER_POWER   = "active_power"              # source timeseries (kW)
+KEY_ACTUAL_WEEKLY_ENERGY = "actual_weekly_energy_kwh"  # real meter weekly rolling sum
+KEY_ACTUAL_MTD_ENERGY    = "actual_mtd_energy_kwh"     # real meter MTD rolling sum
 
 # Minimum valid samples in a day to produce a real daily total.
 # 360 = 6 h × 60 min.  Below this, likely a partial day or major service outage.
@@ -127,16 +129,33 @@ async def run_daily_rollup(
                                     actual_kwh=actual_kwh)
         else:
             month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
-            year_start_utc = day_start_local.replace(month=1, day=1).astimezone(timezone.utc)
+            year_start_local = day_start_local.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            year_start_utc = year_start_local.astimezone(timezone.utc)
+
+            # Determine the start of the current 7-day bucket
+            doy = (day_start_local - year_start_local).days + 1
+            bucket_idx = (doy - 1) // 7
+            bucket_start_local = year_start_local + timedelta(days=bucket_idx * 7)
+            week_start_utc = bucket_start_local.astimezone(timezone.utc)
+            week_ts_ms = int(bucket_start_local.timestamp() * 1000)
 
             monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
             yearly_history  = await _get_historical_sum(tb_client, plant.id, year_start_utc,   day_start_utc, KEY_DAILY_ENERGY_EXPECTED)
 
             monthly_kwh = monthly_history + kwh
             yearly_kwh  = yearly_history  + kwh
+            
+            actual_mtd_kwh = -1.0
+            actual_weekly_kwh = -1.0
+            if actual_kwh >= 0:
+                actual_monthly_history = await _get_historical_sum(tb_client, plant.id, month_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY)
+                actual_weekly_history = await _get_historical_sum(tb_client, plant.id, week_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY)
+                actual_mtd_kwh = actual_monthly_history + actual_kwh
+                actual_weekly_kwh = actual_weekly_history + actual_kwh
 
             await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh,
-                                    actual_kwh=actual_kwh)
+                                    actual_kwh=actual_kwh, actual_mtd_kwh=actual_mtd_kwh,
+                                    actual_weekly_kwh=actual_weekly_kwh, week_ts_ms=week_ts_ms)
             stats["ok"] += 1
 
     # Ancestor roll-up
@@ -276,7 +295,8 @@ async def _integrate_actual_day(
 async def _safe_write_daily(
     tb_client, entity_id: str, ts_ms: int,
     kwh: float, monthly_kwh: float = -1.0, yearly_kwh: float = -1.0,
-    actual_kwh: float = -1.0,
+    actual_kwh: float = -1.0, actual_mtd_kwh: float = -1.0,
+    actual_weekly_kwh: float = -1.0, week_ts_ms: int = -1,
 ) -> None:
     """Write daily energy keys (expected + actual); best-effort."""
     if kwh == -1.0:
@@ -299,10 +319,14 @@ async def _safe_write_daily(
     # Always include actual if we have it (independent of expected)
     if actual_kwh >= 0:
         values[KEY_ACTUAL_DAILY_ENERGY] = round(actual_kwh, 3)
+        if actual_mtd_kwh >= 0:
+            values[KEY_ACTUAL_MTD_ENERGY] = round(actual_mtd_kwh, 3)
     else:
         values[KEY_ACTUAL_DAILY_ENERGY] = -1
     try:
         await tb_client.post_telemetry("ASSET", entity_id, [{"ts": ts_ms, "values": values}])
+        if week_ts_ms > 0 and actual_weekly_kwh >= 0:
+            await tb_client.post_telemetry("ASSET", entity_id, [{"ts": week_ts_ms, "values": {KEY_ACTUAL_WEEKLY_ENERGY: round(actual_weekly_kwh, 3)}}])
     except Exception as exc:
         log.error("_safe_write_daily: failed for %s: %s", entity_id, exc)
 

@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
@@ -62,6 +62,14 @@ KEY_P95_DAILY     = "forecast_p95_daily"      # MWh — daily P95 expected energ
 KEY_P50_MONTHLY   = "forecast_p50_monthly"    # MWh — monthly P50 expected energy
 KEY_P90_MONTHLY   = "forecast_p90_monthly"    # MWh — monthly P90 expected energy
 KEY_P95_MONTHLY   = "forecast_p95_monthly"    # MWh — monthly P95 expected energy
+
+KEY_P50_WEEKLY    = "forecast_p50_weekly"     # MWh — weekly P50 expected energy
+KEY_P90_WEEKLY    = "forecast_p90_weekly"     # MWh — weekly P90 expected energy
+KEY_P95_WEEKLY    = "forecast_p95_weekly"     # MWh — weekly P95 expected energy
+
+KEY_P50_MTD       = "forecast_p50_mtd"        # MWh — MTD P50 expected energy
+KEY_P90_MTD       = "forecast_p90_mtd"        # MWh — MTD P90 expected energy
+KEY_P95_MTD       = "forecast_p95_mtd"        # MWh — MTD P95 expected energy
 
 ATTR_P50_ENERGY   = "p50_energy"              # kWh — annual P50 (SERVER_SCOPE attr)
 ATTR_P90_ENERGY   = "p90_energy"              # kWh — annual P90
@@ -252,6 +260,8 @@ async def _process_plant(
     # ── Build TB records ──────────────────────────────────────────────────────
     daily_records   = _build_daily_records(daily_p_kwh, target_year, tz)
     monthly_records = _build_monthly_records(monthly_p_kwh, target_year, tz)
+    weekly_records  = _build_weekly_records(daily_p_kwh, target_year, tz)
+    mtd_records     = _build_mtd_records(daily_p_kwh, target_year, tz)
 
     annual_attrs = {
         ATTR_P50_ENERGY: round(p50_annual_kwh, 1),
@@ -265,6 +275,8 @@ async def _process_plant(
     # ── Write to TB ───────────────────────────────────────────────────────────
     await tb_client.post_telemetry("ASSET", plant_id, daily_records)
     await tb_client.post_telemetry("ASSET", plant_id, monthly_records)
+    await tb_client.post_telemetry("ASSET", plant_id, weekly_records)
+    await tb_client.post_telemetry("ASSET", plant_id, mtd_records)
     await tb_client.post_attributes("ASSET", plant_id, "SERVER_SCOPE", annual_attrs)
 
 
@@ -641,4 +653,102 @@ def _build_monthly_records(
                 KEY_P95_MONTHLY: round(pvals[0.05] / 1000.0, 3),
             },
         })
+    return records
+
+
+def _build_weekly_records(
+    daily_p_kwh: Dict[Tuple[int, int], Dict[float, float]],
+    target_year: int,
+    tz: ZoneInfo,
+) -> List[dict]:
+    """Build 52 weekly TB timeseries records for the target year.
+    
+    Groups 365 days into 52 7-day buckets starting Jan 1. Week 52 has 8 (or 9) days.
+    ts = local midnight of the 1st day of the bucket.
+    Values in MWh.
+    """
+    records: List[dict] = []
+    
+    d1 = datetime(target_year, 1, 1, 0, 0, 0)
+    is_leap = calendar.isleap(target_year)
+    days_in_year = 366 if is_leap else 365
+    
+    for w in range(52):
+        start_doy = w * 7 + 1
+        end_doy = days_in_year if w == 51 else (w + 1) * 7
+        
+        p50_sum = p90_sum = p95_sum = 0.0
+        bucket_start_date = d1 + timedelta(days=start_doy - 1)
+        
+        for doy in range(start_doy, end_doy + 1):
+            curr_date = d1 + timedelta(days=doy - 1)
+            month, day = curr_date.month, curr_date.day
+            key = (month, day)
+            
+            if key not in daily_p_kwh:
+                _, days_in_month = calendar.monthrange(target_year, month)
+                fallback = (month, days_in_month - 1) if day == 29 else (month, day)
+                pvals = daily_p_kwh.get(fallback, {0.50: 0.0, 0.10: 0.0, 0.05: 0.0})
+            else:
+                pvals = daily_p_kwh[key]
+                
+            p50_sum += pvals[0.50]
+            p90_sum += pvals[0.10]
+            p95_sum += pvals[0.05]
+            
+        ts_local = datetime(target_year, bucket_start_date.month, bucket_start_date.day, 0, 0, 0, tzinfo=tz)
+        ts_ms = int(ts_local.timestamp() * 1000)
+        
+        records.append({
+            "ts": ts_ms,
+            "values": {
+                KEY_P50_WEEKLY: round(p50_sum / 1000.0, 3),
+                KEY_P90_WEEKLY: round(p90_sum / 1000.0, 3),
+                KEY_P95_WEEKLY: round(p95_sum / 1000.0, 3),
+            },
+        })
+    return records
+
+
+def _build_mtd_records(
+    daily_p_kwh: Dict[Tuple[int, int], Dict[float, float]],
+    target_year: int,
+    tz: ZoneInfo,
+) -> List[dict]:
+    """Build 365/366 daily MTD rolling sum TB timeseries records.
+    
+    ts = local midnight of each day.
+    value = sum of P-values from the 1st of that month up to that day (inclusive).
+    Values in MWh.
+    """
+    records: List[dict] = []
+    
+    for month in range(1, 13):
+        _, days_in_month = calendar.monthrange(target_year, month)
+        
+        p50_cum = p90_cum = p95_cum = 0.0
+        for day in range(1, days_in_month + 1):
+            key = (month, day)
+            
+            if key not in daily_p_kwh:
+                fallback = (month, days_in_month - 1) if day == 29 else (month, day)
+                pvals = daily_p_kwh.get(fallback, {0.50: 0.0, 0.10: 0.0, 0.05: 0.0})
+            else:
+                pvals = daily_p_kwh[key]
+                
+            p50_cum += pvals[0.50]
+            p90_cum += pvals[0.10]
+            p95_cum += pvals[0.05]
+            
+            ts_local = datetime(target_year, month, day, 0, 0, 0, tzinfo=tz)
+            ts_ms = int(ts_local.timestamp() * 1000)
+            
+            records.append({
+                "ts": ts_ms,
+                "values": {
+                    KEY_P50_MTD: round(p50_cum / 1000.0, 3),
+                    KEY_P90_MTD: round(p90_cum / 1000.0, 3),
+                    KEY_P95_MTD: round(p95_cum / 1000.0, 3),
+                },
+            })
     return records
