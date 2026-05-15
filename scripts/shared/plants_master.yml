@@ -1,0 +1,85 @@
+# plants_master.yml — Single source of truth for all plant ThingsBoard configurations.
+#
+# Managed by: scripts/shared/tb_config_loader.py
+# Schema: scripts/shared/plants_master.schema.json
+#
+# HOW TO ADD A PLANT
+# ------------------
+# 1. Copy one of the entries below and update all required fields.
+# 2. Run:  python scripts/shared/tb_config_loader.py --plant <asset_id> --dry-run
+# 3. Review the diff, then run without --dry-run to apply.
+# 4. Run:  python scripts/shared/audit_tb_config.py --plant-ids <asset_id>
+#    Expect 0 ERR.
+# 5. Run:  python scripts/shared/onboard_plant.py --asset-id <asset_id>
+#    (chains p-value backfill, daily-energy backfill, loss-rollup backfill).
+#
+# IDEMPOTENCY
+# -----------
+# tb_config_loader.py computes a SHA-1 of the pvlib_config blob and compares it
+# against the plant's pvlib_config_hash SERVER_SCOPE attribute. If they match,
+# the plant is skipped (no-op). Use --force-overwrite to bypass.
+#
+# DEPRECATION
+# -----------
+# set_active_power_unit.py is deprecated. active_power_unit is now set here and
+# applied by tb_config_loader.py.
+
+plants:
+  # ──────────────────────────────────────────────────────────────────────────────
+  # KSP — Kebithigollewa Solar Power (12.81 MW Fixed Tilt, Astronergy 580W)
+  # Asset: https://windforce.thingsnode.cc → EnergyMeter plant asset
+  # ──────────────────────────────────────────────────────────────────────────────
+  - asset_id: "0e4b4070-50ff-11ef-b4ce-d5aee9e495ad"
+    name: "KSP_Plant"
+    latitude: 8.3694
+    longitude: 80.6523
+    altitude_m: 88
+    timezone: "Asia/Colombo"
+
+    capacity_kwp: 12810.0
+    capacity_unit: "kW"
+    active_power_unit: "kW"
+    actual_power_keys: "EnergyMeter_active_power"
+    commissioning_date: "2024-08-01"
+    tariff_rate_lkr: 22.0
+
+    orientations:
+      - name: "Main"
+        tilt: 8
+        azimuth: 0
+        module_count: 23296
+        use_measured_poa: true
+
+    module_template: "astronergy_580w"
+    inverter_template: "huawei_300ktl"
+    iam_template: "ksp_iam"
+
+    station:
+      weather_station_id: "da2617d0-1ea6-11f1-a954-a570b75cadc0"
+      ghi_key: "wstn1_horiz_irradiance"
+      poa_key: "wstn1_tilted_irradiance"
+      air_temp_key: "wstn1_temperature_ambient"
+      wind_speed_key: "wstn1_wind_speed"
+      freshness_minutes: 10
+      sanity_max_ghi_wm2: 1400
+      sanity_max_poa_wm2: 1500
+
+    losses:
+      soiling: 0.03
+      lid: 0.015
+      module_quality: -0.003
+      mismatch: 0.02
+      dc_wiring: 0.015
+      ac_wiring: 0.01
+      far_shading: 1.0
+      albedo: 0.2
+
+    thermal_model: "open_rack_glass_glass"
+    setpoint_keys: "setpoint_active_power,curtailment_limit,power_limit"
+
+    pvlib_enabled: true
+    loss_attribution_enabled: true
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # ADD FURTHER PLANTS BELOW FOLLOWING THE SAME STRUCTURE.
+  # ──────────────────────────────────────────────────────────────────────────────

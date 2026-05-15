@@ -570,7 +570,35 @@ async def metrics():
         "# HELP pvlib_discover_cache_misses_total Plant-discovery BFS cache misses",
         "# TYPE pvlib_discover_cache_misses_total counter",
         f'pvlib_discover_cache_misses_total {_discover_cache_misses_total}',
+        "",
+        # ── Throughput gauges (Step 13 — F3) ─────────────────────────────
+        # pvlib_cycle_plants_per_minute: average plants processed per minute over
+        # the last cycle.  0 when no cycle has run yet.
+        "# HELP pvlib_cycle_plants_per_minute Average plants processed per minute in last cycle",
+        "# TYPE pvlib_cycle_plants_per_minute gauge",
     ]
+    _dur_s = (cycle_state.last_cycle_duration_ms or 0) / 1000.0
+    _plants = cycle_state.last_cycle_plants or 0
+    _ppm = (_plants / (_dur_s / 60.0)) if _dur_s > 0 else 0.0
+    lines.append(f'pvlib_cycle_plants_per_minute {_ppm:.2f}')
+
+    # pvlib_cycle_duration_p95_ms: p95 of cycle durations over the last 60 cycles.
+    # Computed from cycle_state.recent_cycle_durations_ms (ring buffer, populated below).
+    # Falls back to last_cycle_duration_ms when fewer than 5 samples are available.
+    lines += [
+        "# HELP pvlib_cycle_duration_p95_ms p95 cycle duration in ms over last 60 cycles",
+        "# TYPE pvlib_cycle_duration_p95_ms gauge",
+    ]
+    _recent = getattr(cycle_state, "recent_cycle_durations_ms", [])
+    if len(_recent) >= 5:
+        import statistics as _stats
+        _sorted = sorted(_recent)
+        _p95_idx = max(0, int(len(_sorted) * 0.95) - 1)
+        _p95 = _sorted[_p95_idx]
+    else:
+        _p95 = cycle_state.last_cycle_duration_ms or 0
+    lines.append(f'pvlib_cycle_duration_p95_ms {_p95}')
+
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 

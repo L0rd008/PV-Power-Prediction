@@ -109,12 +109,19 @@ REQUIRED_ATTRS: List[_AttrSpec] = [
               "Metres above sea level [-500, 9000]"),
     _AttrSpec("timezone",       (str,),         "ERR",  None,
               "IANA timezone string, e.g. 'Asia/Colombo'"),
+    _AttrSpec("Capacity",       (float, int),   "ERR",  lambda v: float(v) > 0,
+              "Plant DC/AC capacity (positive number). Required for loss-attribution "
+              "scaling and curtailment ceiling calculation."),
     _AttrSpec("orientations",   (list, str),    "ERR",  _json_array,
               "JSON array of panel orientations"),
     _AttrSpec("module",         (dict, str),    "ERR",  _json_obj,
               "JSON object with area_m2, efficiency_stc, gamma_p"),
     _AttrSpec("inverter",       (dict, str),    "ERR",  _json_obj,
               "JSON object with ac_rating_kw, etc."),
+    _AttrSpec("active_power_unit", (str,),      "ERR",  lambda v: str(v).strip() in ("kW", "W"),
+              "Unit of the plant's active-power telemetry. Must be exactly 'kW' or 'W'. "
+              "A wrong value causes actual_daily_energy_kwh to be off by 1000×. "
+              "Set via tb_config_loader.py (set_active_power_unit.py is deprecated)."),
 ]
 
 RECOMMENDED_ATTRS: List[_AttrSpec] = [
@@ -132,8 +139,15 @@ RECOMMENDED_ATTRS: List[_AttrSpec] = [
     _AttrSpec("far_shading",    (float, int),   "WARN", _shade,  "Shading multiplier (0, 1]"),
     _AttrSpec("defaults",       (dict, str),    "WARN", _json_obj,
               "JSON: {wind_speed_ms, air_temp_c} used when station data absent"),
-    _AttrSpec("active_power_unit", (str,),      "WARN", lambda v: str(v) in ("kW", "W"),
-              "Set by set_active_power_unit.py — must be 'kW' or 'W'"),
+    _AttrSpec("actual_power_keys", (str,),      "WARN", None,
+              "CSV list of TB telemetry keys for meter power (e.g. 'EnergyMeter_active_power'). "
+              "Missing → service defaults to 'active_power'. Add a WARN if your plant's meter "
+              "publishes under a non-standard key name."),
+    _AttrSpec("tariff_rate_lkr", (float, int),  "WARN", lambda v: float(v) >= 0,
+              "Electricity tariff in LKR/kWh. Missing → loss_revenue_daily_lkr written as -1."),
+    _AttrSpec("commissioning_date", (str,),     "WARN", None,
+              "ISO date the plant was commissioned (YYYY-MM-DD). Missing → lifetime "
+              "attribute recompute cannot determine the historical anchor date."),
 ]
 
 ALL_SPECS: List[_AttrSpec] = REQUIRED_ATTRS + RECOMMENDED_ATTRS
@@ -246,6 +260,34 @@ class TBClient:
             name  = info.get("name", asset_id) if info else asset_id
             plants.append({"id": asset_id, "name": name, "attrs": attrs})
         return plants
+
+    def get_telemetry_count(
+        self,
+        asset_id: str,
+        key: str,
+        year_start_ms: int,
+        year_end_ms: int,
+    ) -> int:
+        """Return how many timeseries rows exist for *key* within [year_start_ms, year_end_ms).
+
+        Uses limit=1&agg=COUNT equivalent via limit=10000 fetch + row count.
+        TB OSS doesn't expose a native COUNT endpoint, so we fetch with a high limit
+        and count — acceptable for audit tooling (not a hot path).
+        """
+        data = self._get(
+            f"/api/plugins/telemetry/ASSET/{asset_id}/values/timeseries",
+            params={
+                "keys":      key,
+                "startTs":   year_start_ms,
+                "endTs":     year_end_ms,
+                "limit":     500,
+                "orderBy":   "ASC",
+                "useStrictDataTypes": "false",
+            },
+        )
+        if not data:
+            return 0
+        return len(data.get(key, []))
 
 
 # ── Audit logic ───────────────────────────────────────────────────────────────
@@ -364,7 +406,66 @@ def audit_plant(
             actual=repr(coerced)[:60],
         ))
 
+    # ── Cross-checks (multi-attr rules) ──────────────────────────────────────
+    # WS/Solcast: flag if no weather data source is configured (falls to clearsky)
+    has_ws      = bool(attrs.get("weather_station_id") or attrs.get("station"))
+    has_solcast = bool(attrs.get("solcast_resource_id"))
+    if not has_ws and not has_solcast:
+        findings.append(Finding(
+            plant_id=pid, plant_name=pname,
+            severity="WARN",
+            attribute="weather_station_id / solcast_resource_id",
+            status="MISSING",
+            expected="at least one of weather_station_id or solcast_resource_id",
+            actual="(both absent)",
+            note="Plant will fall back to Tier-3 clear-sky model — lower accuracy.",
+        ))
+
     return findings
+
+
+def _dynamic_audit_plant(tb: "TBClient", plant: dict, current_year: int) -> List[Finding]:
+    """Additional checks that require live TB telemetry queries (row counts, etc.)."""
+    pid   = plant["id"]
+    pname = plant["name"]
+    findings: List[Finding] = []
+
+    # forecast_p50_daily row count: warn if fewer than 360 rows for current year
+    try:
+        count = tb.get_telemetry_count(
+            pid, "forecast_p50_daily",
+            year_start_ms=_year_start_ms(current_year),
+            year_end_ms=_year_start_ms(current_year + 1),
+        )
+        if count < 360:
+            findings.append(Finding(
+                plant_id=pid, plant_name=pname,
+                severity="WARN",
+                attribute="forecast_p50_daily",
+                status="RANGE_ERROR",
+                expected="≥ 360 rows for current year",
+                actual=f"{count} rows",
+                note="pvalue_job has not run for this plant yet (or ran for a different year). "
+                     "Run: POST /admin/run-pvalues-plant?asset_id=" + pid,
+            ))
+    except Exception as exc:
+        findings.append(Finding(
+            plant_id=pid, plant_name=pname,
+            severity="WARN",
+            attribute="forecast_p50_daily",
+            status="MISSING",
+            expected="≥ 360 rows for current year",
+            actual=f"query error: {exc}",
+            note="Could not verify pvalue_job output for this plant.",
+        ))
+
+    return findings
+
+
+def _year_start_ms(year: int) -> int:
+    """Return Unix-ms for January 1 of the given year at midnight UTC."""
+    import calendar
+    return int(calendar.timegm((year, 1, 1, 0, 0, 0, 0, 1, 0))) * 1000
 
 
 def _ref_value(ref_config: dict, key: str) -> Any:
@@ -585,9 +686,13 @@ def main() -> int:
             return 2
 
     # ── Audit ─────────────────────────────────────────────────────────────────
+    import datetime as _dt
+    current_year = _dt.datetime.utcnow().year
+
     all_findings: List[Finding] = []
     for plant in plants:
         findings = audit_plant(plant, ref_config=ref_config)
+        findings += _dynamic_audit_plant(tb, plant, current_year)
         all_findings.extend(findings)
         err_count  = sum(1 for f in findings if f.severity == "ERR")
         warn_count = sum(1 for f in findings if f.severity == "WARN")

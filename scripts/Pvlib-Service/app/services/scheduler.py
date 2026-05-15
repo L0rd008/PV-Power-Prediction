@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class CycleState:
-    """Mutable state shared with the /health endpoint."""
+    """Mutable state shared with the /health and /metrics endpoints."""
     service_started_at: Optional[datetime] = None
     last_cycle_started_at: Optional[datetime] = None
     last_cycle_finished_at: Optional[datetime] = None
@@ -41,6 +41,19 @@ class CycleState:
     last_cycle_failures: int = 0
     total_cycles: int = 0
     total_failures: int = 0
+    # Ring buffer of recent cycle durations in ms (up to 60 samples) for p95 gauge.
+    recent_cycle_durations_ms: list = None
+
+    def __post_init__(self):
+        self.recent_cycle_durations_ms = []
+
+    def record_duration(self, duration_ms: float) -> None:
+        """Append to ring buffer, keeping only the last 60 samples."""
+        if self.recent_cycle_durations_ms is None:
+            self.recent_cycle_durations_ms = []
+        self.recent_cycle_durations_ms.append(duration_ms)
+        if len(self.recent_cycle_durations_ms) > 60:
+            self.recent_cycle_durations_ms = self.recent_cycle_durations_ms[-60:]
 
 
 # Module-level singleton — read by /health
@@ -103,6 +116,7 @@ async def run_cycle_now(tb_client=None) -> dict:
         duration_ms = (asyncio.get_event_loop().time() - t0) * 1000
         cycle_state.last_cycle_finished_at = datetime.now(timezone.utc)
         cycle_state.last_cycle_duration_ms = round(duration_ms, 1)
+        cycle_state.record_duration(round(duration_ms, 1))  # Step 13: p95 ring buffer
         cycle_state.last_cycle_plants = summary.get("plants_processed", 0)
         cycle_state.last_cycle_failures = summary.get("plants_failed", 0)
         cycle_state.total_cycles += 1
@@ -300,11 +314,74 @@ async def run_pvalue_newplants_now() -> dict:
         from app.services.pvalue_job import run_pvalue_job
         result = await run_pvalue_job(effective_client, plant_ids=missing_ids)
         result["new_plants"] = len(missing_ids)
+
+        # ── Step 12: Auto-backfill for newly P-valued plants ─────────────────
+        if settings.AUTO_ONBOARD_BACKFILL_ENABLED and missing_ids:
+            await _auto_backfill_new_plants(effective_client, missing_ids)
+
         return result
 
     except Exception as exc:
         log.exception("run_pvalue_newplants_now: failed: %s", exc)
         return {"status": "error", "error": str(exc)}
+
+
+async def _auto_backfill_new_plants(tb_client, plant_ids: list) -> None:
+    """Chain 30-day daily-energy and loss-rollup backfill for newly onboarded plants.
+
+    Gated by AUTO_ONBOARD_BACKFILL_ENABLED (default false).
+    Each plant that already has 'onboarding_backfilled_at' is skipped.
+    Writes 'onboarding_backfilled_at' to SERVER_SCOPE on success.
+
+    Runs sequentially per plant to avoid bursting TB at 01:00.
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from app.services.daily_job import run_daily_rollup
+    from app.services.loss_rollup_job import run_loss_rollup
+
+    backfill_days = 30
+
+    for plant_id in plant_ids:
+        try:
+            attrs = await tb_client.get_asset_attributes(plant_id)
+            if attrs.get("onboarding_backfilled_at"):
+                log.info("_auto_backfill: skipping %s (already backfilled at %s)",
+                         plant_id, attrs["onboarding_backfilled_at"])
+                continue
+
+            log.info("_auto_backfill: starting %d-day backfill for %s", backfill_days, plant_id)
+            today_utc = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+            for day_offset in range(1, backfill_days + 1):
+                target_day = today_utc - _td(days=day_offset)
+                try:
+                    await run_daily_rollup(tb_client, date=target_day)
+                except Exception as exc:
+                    log.warning("_auto_backfill: daily_job failed for %s day-%d: %s",
+                                plant_id, day_offset, exc)
+
+            # Loss attribution backfill (best-effort — skipped if loss not enabled)
+            loss_attr = attrs.get("loss_attribution_enabled")
+            loss_enabled = loss_attr is None or str(loss_attr).lower() not in ("false", "0")
+            if loss_enabled:
+                for day_offset in range(1, backfill_days + 1):
+                    target_day = today_utc - _td(days=day_offset)
+                    try:
+                        await run_loss_rollup(tb_client, date=target_day)
+                    except Exception as exc:
+                        log.warning("_auto_backfill: loss_rollup failed for %s day-%d: %s",
+                                    plant_id, day_offset, exc)
+
+            # Write completion marker
+            now_iso = _dt.now(_tz.utc).isoformat()
+            await tb_client.post_attributes(
+                "ASSET", plant_id, "SERVER_SCOPE",
+                {"onboarding_backfilled_at": now_iso},
+            )
+            log.info("_auto_backfill: completed for %s at %s", plant_id, now_iso)
+
+        except Exception as exc:
+            log.error("_auto_backfill: unhandled error for %s: %s", plant_id, exc)
 
 
 def start_scheduler(tb_client=None) -> None:

@@ -161,6 +161,16 @@ class Settings(BaseSettings):
     """Maximum retry attempts per PVGIS cell fetch on transient network errors.
     Exponential back-off: 2 s, 4 s, 8 s between attempts."""
 
+    AUTO_ONBOARD_BACKFILL_ENABLED: bool = False
+    """When true, the 01:00 new-plant detection cron also chains a 30-day daily-energy
+    and loss-rollup backfill for any newly P-valued plant.  A per-plant SERVER_SCOPE
+    attribute 'onboarding_backfilled_at' is written after backfill completes; the cron
+    skips plants that already have this marker.
+
+    Default false — opt-in only.  Enable after validating the bounded-backfill window
+    is acceptable for your fleet size.  Plants with many days of history will take
+    longer; the cron runs sequentially per plant to avoid overloading TB."""
+
     @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

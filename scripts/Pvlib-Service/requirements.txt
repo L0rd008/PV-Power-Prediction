@@ -26,6 +26,7 @@ pytz==2024.1
 # Config
 python-dotenv==1.0.1
 pydantic-settings==2.3.4
+PyYAML==6.0.2
 
 # Scheduler (P1-E: APScheduler internal cadence)
 apscheduler==3.10.4
