@@ -40,6 +40,9 @@ KEY_ACTUAL_METER_POWER   = "active_power"              # source timeseries (kW)
 KEY_ACTUAL_WEEKLY_ENERGY = "actual_weekly_energy_kwh"  # real meter weekly rolling sum
 KEY_ACTUAL_MTD_ENERGY    = "actual_mtd_energy_kwh"     # real meter MTD rolling sum
 
+# One-time warning registry for plants still using legacy 'actual_power_key' (singular)
+_WARNED_SINGULAR_KEY: set = set()
+
 # Minimum solar-generation coverage required to produce a valid daily total.
 # Replaces sample-count guard — works correctly for any sampling cadence
 # (1-min, 5-min, 15-min, etc.).
@@ -105,9 +108,59 @@ async def run_daily_rollup(
     plant_kwh: Dict[str, float] = {}  # plant_id → kwh (or -1 for invalid)
 
     for plant in plants:
+        # ── Fetch plant attrs first (needed for tz, scaling, key resolution) ──
+        try:
+            attrs = await tb_client.get_asset_attributes(plant.id)
+        except Exception as exc:
+            log.warning("run_daily_rollup: attrs fetch failed for %s: %s", plant.id, exc)
+            attrs = {}
+
+        # ── Step 18: Per-plant timezone for day boundaries ─────────────────────
+        plant_tz_str = str(attrs.get("timezone") or settings.TZ_LOCAL)
+        try:
+            plant_tz = ZoneInfo(plant_tz_str)
+        except Exception:
+            log.warning(
+                "run_daily_rollup: invalid timezone '%s' for %s — falling back to %s",
+                plant_tz_str, plant.id, settings.TZ_LOCAL,
+            )
+            plant_tz = ZoneInfo(settings.TZ_LOCAL)
+
+        # Anchor on the global day_start_utc to derive the plant's local calendar date.
+        # For a single-TZ fleet this is identical to the global day_start_local.
+        plant_day_ref         = day_start_utc.astimezone(plant_tz)
+        plant_day_start_local = plant_day_ref.replace(hour=0, minute=0, second=0, microsecond=0)
+        plant_day_end_local   = plant_day_start_local + timedelta(days=1)
+        plant_day_start_utc   = plant_day_start_local.astimezone(timezone.utc)
+        plant_day_end_utc     = plant_day_end_local.astimezone(timezone.utc)
+        plant_day_ts_ms       = int(plant_day_start_local.timestamp() * 1000)
+
+        # ── Step 16: W→kW scaling + multi-key resolution ─────────────────────
+        active_power_unit = str(attrs.get("active_power_unit") or "kW").strip().upper()
+        scale_w_to_kw = (active_power_unit == "W")
+
+        # actual_power_keys: plural CSV (Step 16); singular legacy fallback (Step 17)
+        keys_csv = str(attrs.get("actual_power_keys") or "").strip()
+        if keys_csv:
+            actual_power_keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+        else:
+            singular = str(attrs.get("actual_power_key") or "").strip()
+            if singular:
+                if plant.id not in _WARNED_SINGULAR_KEY:
+                    log.warning(
+                        "run_daily_rollup: plant %s uses legacy 'actual_power_key' (singular) — "
+                        "migrate to 'actual_power_keys' CSV attribute",
+                        plant.id,
+                    )
+                    _WARNED_SINGULAR_KEY.add(plant.id)
+                actual_power_keys = [singular]
+            else:
+                actual_power_keys = [KEY_ACTUAL_METER_POWER]  # "active_power" default
+
+        # ── Integrate expected (potential_power) for the plant-local day ───────
         try:
             kwh = await _integrate_plant_day(
-                tb_client, plant.id, day_start_utc, day_end_utc
+                tb_client, plant.id, plant_day_start_utc, plant_day_end_utc, plant_tz
             )
         except Exception as exc:
             log.error("run_daily_rollup: failed for %s: %s", plant.id, exc)
@@ -116,23 +169,25 @@ async def run_daily_rollup(
 
         plant_kwh[plant.id] = kwh
 
-        # ── Compute actual meter generation for the same day ──────────────
+        # ── Integrate actual meter generation for the plant-local day ──────────
         try:
             actual_kwh = await _integrate_actual_day(
-                tb_client, plant.id, day_start_utc, day_end_utc
+                tb_client, plant.id, plant_day_start_utc, plant_day_end_utc,
+                actual_power_keys=actual_power_keys, scale_w_to_kw=scale_w_to_kw,
+                plant_tz=plant_tz,
             )
         except Exception as exc:
             log.warning("run_daily_rollup: actual integration failed for %s: %s", plant.id, exc)
             actual_kwh = -1.0
 
-        # ── Compute date helpers (needed by both branches) ───────────────────
-        year_start_local = day_start_local.replace(
+        # ── Compute date helpers using plant-local day ─────────────────────────
+        year_start_local = plant_day_start_local.replace(
             month=1, day=1, hour=0, minute=0, second=0, microsecond=0
         )
-        month_start_utc = day_start_local.replace(day=1).astimezone(timezone.utc)
+        month_start_utc = plant_day_start_local.replace(day=1).astimezone(timezone.utc)
         year_start_utc  = year_start_local.astimezone(timezone.utc)
 
-        doy                = (day_start_local - year_start_local).days + 1
+        doy                = (plant_day_start_local - year_start_local).days + 1
         bucket_idx         = (doy - 1) // 7
         bucket_start_local = year_start_local + timedelta(days=bucket_idx * 7)
         week_start_utc     = bucket_start_local.astimezone(timezone.utc)
@@ -145,29 +200,29 @@ async def run_daily_rollup(
         actual_weekly_kwh = -1.0
         if actual_kwh >= 0:
             actual_monthly_history = await _get_historical_sum(
-                tb_client, plant.id, month_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY
+                tb_client, plant.id, month_start_utc, plant_day_start_utc, KEY_ACTUAL_DAILY_ENERGY
             )
             actual_weekly_history = await _get_historical_sum(
-                tb_client, plant.id, week_start_utc, day_start_utc, KEY_ACTUAL_DAILY_ENERGY
+                tb_client, plant.id, week_start_utc, plant_day_start_utc, KEY_ACTUAL_DAILY_ENERGY
             )
             actual_mtd_kwh    = actual_monthly_history + actual_kwh
             actual_weekly_kwh = actual_weekly_history  + actual_kwh
 
         if kwh == -1.0:
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, -1.0, -1.0, -1.0,
+            await _safe_write_daily(tb_client, plant.id, plant_day_ts_ms, -1.0, -1.0, -1.0,
                                     actual_kwh=actual_kwh, actual_mtd_kwh=actual_mtd_kwh,
                                     actual_weekly_kwh=actual_weekly_kwh, week_ts_ms=week_ts_ms)
         else:
             monthly_history = await _get_historical_sum(
-                tb_client, plant.id, month_start_utc, day_start_utc, KEY_DAILY_ENERGY_EXPECTED
+                tb_client, plant.id, month_start_utc, plant_day_start_utc, KEY_DAILY_ENERGY_EXPECTED
             )
             yearly_history  = await _get_historical_sum(
-                tb_client, plant.id, year_start_utc,  day_start_utc, KEY_DAILY_ENERGY_EXPECTED
+                tb_client, plant.id, year_start_utc,  plant_day_start_utc, KEY_DAILY_ENERGY_EXPECTED
             )
             monthly_kwh = monthly_history + kwh
             yearly_kwh  = yearly_history  + kwh
 
-            await _safe_write_daily(tb_client, plant.id, day_ts_ms, kwh, monthly_kwh, yearly_kwh,
+            await _safe_write_daily(tb_client, plant.id, plant_day_ts_ms, kwh, monthly_kwh, yearly_kwh,
                                     actual_kwh=actual_kwh, actual_mtd_kwh=actual_mtd_kwh,
                                     actual_weekly_kwh=actual_weekly_kwh, week_ts_ms=week_ts_ms)
             stats["ok"] += 1
@@ -206,8 +261,15 @@ async def _integrate_plant_day(
     plant_id: str,
     day_start_utc: datetime,
     day_end_utc: datetime,
+    plant_tz=None,
 ) -> float:
     """Read potential_power for one plant over the day, integrate, return kWh.
+
+    Parameters
+    ----------
+    plant_tz : ZoneInfo, optional
+        Plant-local timezone for solar window (05:00-19:00 local) filtering.
+        Defaults to settings.TZ_LOCAL when None.
 
     Returns -1.0 if data is insufficient (< MIN_VALID_SAMPLES valid records).
     """
@@ -237,8 +299,8 @@ async def _integrate_plant_day(
         log.info("_integrate_plant_day: all records are sentinels for %s", plant_id)
         return -1.0
 
-    # Filter to 05:00-19:00 local time
-    tz = ZoneInfo(settings.TZ_LOCAL)
+    # Filter to 05:00-19:00 local solar window (per-plant timezone)
+    tz = plant_tz if plant_tz is not None else ZoneInfo(settings.TZ_LOCAL)
     series_local = series.index.tz_convert(tz)
     series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
 
@@ -283,28 +345,64 @@ def _time_weighted_kwh(series) -> tuple:
     return kwh, coverage_h
 
 
+async def _fetch_first_actual_records(
+    tb_client,
+    plant_id: str,
+    actual_power_keys: list,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> tuple:
+    """Try each key in order; return (records, matched_key) for the first non-empty result.
+
+    First-match semantics mirror loss_rollup_job._fetch_first_actual.
+    Returns ([], fallback_key) when all keys yield no data.
+    """
+    for key in actual_power_keys:
+        raw = await tb_client.get_timeseries(
+            "ASSET", plant_id, [key],
+            start=day_start_utc, end=day_end_utc, limit=100_000,
+        )
+        records = raw.get(key, [])
+        if records:
+            return records, key
+    fallback = actual_power_keys[0] if actual_power_keys else KEY_ACTUAL_METER_POWER
+    return [], fallback
+
+
 async def _integrate_actual_day(
     tb_client,
     plant_id: str,
     day_start_utc: datetime,
     day_end_utc: datetime,
+    actual_power_keys: list = None,
+    scale_w_to_kw: bool = False,
+    plant_tz=None,
 ) -> float:
-    """Read actual active_power (kW) for one plant over the day, integrate, return kWh.
+    """Read actual meter power for one plant over the day, integrate, return kWh.
+
+    Parameters
+    ----------
+    actual_power_keys : list
+        Ordered list of TB keys to try (first-match semantics).  Defaults to
+        [KEY_ACTUAL_METER_POWER] ("active_power") when None.
+    scale_w_to_kw : bool
+        When True, multiply the raw series by 0.001 (plant publishes Watts).
 
     Uses time-weighted (trapezoidal) integration — correct for any sampling cadence.
     Returns -1.0 if solar-hour coverage is < MIN_COVERAGE_HOURS.
     """
-    raw = await tb_client.get_timeseries(
-        "ASSET", plant_id,
-        [KEY_ACTUAL_METER_POWER],
-        start=day_start_utc,
-        end=day_end_utc,
-        limit=100_000,
+    if actual_power_keys is None:
+        actual_power_keys = [KEY_ACTUAL_METER_POWER]
+
+    records, matched_key = await _fetch_first_actual_records(
+        tb_client, plant_id, actual_power_keys, day_start_utc, day_end_utc
     )
 
-    records = raw.get(KEY_ACTUAL_METER_POWER, [])
     if not records:
-        log.info("_integrate_actual_day: no active_power records for %s", plant_id)
+        log.info(
+            "_integrate_actual_day: no data for %s (tried keys: %s)",
+            plant_id, actual_power_keys,
+        )
         return -1.0
 
     import pandas as pd
@@ -314,12 +412,19 @@ async def _integrate_actual_day(
         if float(r["value"]) >= 0   # exclude negative sentinel / bad readings
     })
 
+    if scale_w_to_kw and len(series) > 0:
+        log.debug(
+            "_integrate_actual_day: applying W→kW scaling (×0.001) for %s (key=%s)",
+            plant_id, matched_key,
+        )
+        series = series * 0.001
+
     if series.empty:
         log.info("_integrate_actual_day: all records are negative/zero for %s", plant_id)
         return -1.0
 
-    # Filter to 05:00-19:00 local solar window
-    tz = ZoneInfo(settings.TZ_LOCAL)
+    # Filter to 05:00-19:00 local solar window (per-plant timezone)
+    tz = plant_tz if plant_tz is not None else ZoneInfo(settings.TZ_LOCAL)
     series_local = series.index.tz_convert(tz)
     series = series[(series_local.hour >= 5) & (series_local.hour < 19)]
 
@@ -332,7 +437,10 @@ async def _integrate_actual_day(
         )
         return -1.0
 
-    log.debug("_integrate_actual_day: %s → %.1f kWh (coverage=%.1f h)", plant_id, kwh, coverage_h)
+    log.debug(
+        "_integrate_actual_day: %s → %.1f kWh (coverage=%.1f h, key=%s, w_to_kw=%s)",
+        plant_id, kwh, coverage_h, matched_key, scale_w_to_kw,
+    )
     return round(kwh, 3)
 
 

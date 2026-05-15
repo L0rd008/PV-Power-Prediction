@@ -18,6 +18,8 @@ Confirm on the TB side (one-time, before you start):
    - `latitude`, `longitude` set (not 0.0)
    - either `pvlib_config` blob OR flat PVsyst attrs (`tilt`, `azimuth`, `modules_per_string`, `strings_per_inverter`, etc.)
    - `weather_station_id` set to KSP_WSTN's device UUID (preferred) - otherwise the fallback path will try Contains-relation, then name-prefix search
+   - **`actual_power_keys = "EnergyMeter_active_power"`** (Phase 1.5 — required for daily rollup; see Step 7b)
+   - `active_power_unit = "kW"` (KSP meter publishes in kilowatts; set via `tb_config_loader.py`)
 2. KSP_WSTN is publishing recent `ghi` / `poa` and `air_temp` telemetry (within the last 2 minutes). If the station is stale, Tier-1 falls through to Solcast / clearsky.
 
 ---
@@ -190,6 +192,38 @@ This should show `data_source_count{source="tb_station"} >= 5` (or whichever tie
 
 ---
 
+## Step 7b - verify daily rollup (Phase 1.5)
+
+**Phase 1.5** added W→kW unit scaling and `actual_power_keys` CSV multi-key support to `daily_job.py`. Before signing off, run the daily rollup for a recent date that has KSP meter data:
+
+```powershell
+# Trigger the daily rollup for a specific date (adjust YYYY-MM-DD):
+curl.exe "http://127.0.0.1:8000/admin/run-daily?date=2026-05-13"
+```
+
+Expected response:
+
+```json
+{"status": "ok", "date": "2026-05-13", "plants_processed": 1, "errors": 0}
+```
+
+Then verify in ThingsBoard (KSP_Plant → Latest telemetry):
+
+| Key | Expected value |
+|---|---|
+| `actual_daily_energy_kwh` | Non-negative float (kWh for that day); `-1` means no meter data found |
+| `total_generation_expected_kwh` | Non-negative float (pvlib P50 for that day) |
+
+**Key things to confirm:**
+
+- Response shows `errors: 0`. An `errors: 1` or `500` response means the daily job failed — check logs for `KeyError`, `actual_power_keys`, or unit-scaling warnings.
+- `actual_daily_energy_kwh` is **not** `-1`. If it is, check that `actual_power_keys` is set to `"EnergyMeter_active_power"` on KSP_Plant (not the legacy `actual_power_key` singular) and that KSP's meter was publishing on that date.
+- No `WARNING … uses legacy 'actual_power_key'` in the service log. If it appears, migrate the attribute from `actual_power_key` (singular) to `actual_power_keys` (plural) in TB.
+
+> **Note**: The daily rollup timestamps rows at **plant-local midnight** using the `timezone` SERVER_SCOPE attribute (Phase 1.5 Step 18). For KSP (`Asia/Colombo`, UTC+5:30), the row `ts` will be at 18:30 UTC of the prior calendar day. This is correct.
+
+---
+
 ## Step 8 - sign-off checklist
 
 Before hand-off to the hosting team, confirm all of:
@@ -200,8 +234,11 @@ Before hand-off to the hosting team, confirm all of:
 - [ ] `/health` returns `200` after the first cycle
 - [ ] The log shows no repeated tracebacks
 - [ ] `data_source` matches the tier you expect (`tb_station` on a healthy day)
+- [ ] (Phase 1.5) `run-daily` returned `errors: 0` for a recent date
+- [ ] (Phase 1.5) `actual_daily_energy_kwh` is non-negative in KSP latest telemetry
+- [ ] (Phase 1.5) No `legacy 'actual_power_key'` WARN in service log
 
-If all six pass, the service is production-ready for the hosting team.
+If all nine pass, the service is production-ready for the hosting team.
 
 ---
 
@@ -228,3 +265,6 @@ copy .env.example .env
 | `py -3.12` not found | Install Python 3.12 x64, reopen PowerShell, and rerun the setup |
 | You used Python 3.13 and `pip install` fails on `pydantic-core` | Expected with the current pinned stack on Windows - recreate the venv with Python 3.12 instead |
 | `ImportError: cannot import name 'retry'` | Run `pip install tenacity` - the requirements include it, but your venv may have been created from an older file |
+| `actual_daily_energy_kwh = -1` after run-daily | KSP_Plant is missing `actual_power_keys` server attribute or it doesn't match the telemetry key. Set `actual_power_keys = "EnergyMeter_active_power"` in TB SERVER_SCOPE (or run `tb_config_loader.py` with the updated `plants_master.yml` entry) |
+| Log shows `uses legacy 'actual_power_key'` WARN | Rename the TB attribute from `actual_power_key` (singular) to `actual_power_keys` (plural, CSV). Use `tb_config_loader.py` to set it. |
+| `actual_daily_energy_kwh` is ~1000× too large | `active_power_unit` is set to `"kW"` but the meter publishes Watts. Set `active_power_unit = "W"` and re-run. |

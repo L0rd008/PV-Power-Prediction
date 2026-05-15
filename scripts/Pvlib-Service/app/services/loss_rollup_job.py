@@ -97,6 +97,9 @@ POTENTIAL_UNDER_ACTIVE_RATIO = 2.0
 POTENTIAL_UNDER_ACTIVE_MIN_SAMPLES = 30
 POTENTIAL_UNDER_ACTIVE_MIN_CAPACITY_FRACTION = 0.20
 
+# One-time warning registry for plants still using legacy 'actual_power_key' (singular)
+_WARNED_SINGULAR_KEY: set = set()
+
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
@@ -346,15 +349,31 @@ async def _process_plant(
     write_daily: bool = True,
 ) -> Dict[str, object]:
     """Compute and write one plant's daily loss keys.  Returns status dict."""
-    async def _write(daily_values: Dict[str, float], data_source: str) -> None:
-        if write_daily:
-            await _safe_write_daily(tb_client, plant_id, day_ts_ms, daily_values, data_source)
-
     try:
         attrs = await tb_client.get_asset_attributes(plant_id)
     except Exception as exc:
         log.error("_process_plant: failed to read attrs for %s: %s", plant_id, exc)
         return _make_sentinel_result("error:attribute_read_failed")
+
+    # ── Step 18: Per-plant timezone for day-boundary ts ───────────────────────
+    plant_tz_str = str(attrs.get("timezone") or settings.TZ_LOCAL)
+    try:
+        plant_tz = ZoneInfo(plant_tz_str)
+    except Exception:
+        log.warning(
+            "_process_plant: invalid timezone '%s' for %s — using %s",
+            plant_tz_str, plant_id, settings.TZ_LOCAL,
+        )
+        plant_tz = ZoneInfo(settings.TZ_LOCAL)
+
+    # Recompute day_ts_ms in plant-local timezone (no-op when plant and service share TZ)
+    plant_day_ref         = day_start_utc.astimezone(plant_tz)
+    plant_day_start_local = plant_day_ref.replace(hour=0, minute=0, second=0, microsecond=0)
+    plant_day_ts_ms       = int(plant_day_start_local.timestamp() * 1000)
+
+    async def _write(daily_values: Dict[str, float], data_source: str) -> None:
+        if write_daily:
+            await _safe_write_daily(tb_client, plant_id, plant_day_ts_ms, daily_values, data_source)
 
     # Check per-plant loss attribution override
     loss_attr_enabled = attrs.get("loss_attribution_enabled")
@@ -378,9 +397,23 @@ async def _process_plant(
     sp_keys_raw = attrs.get("setpoint_keys") or settings.LOSS_DEFAULT_SETPOINT_KEYS
     setpoint_keys = [k.strip() for k in str(sp_keys_raw).split(",") if k.strip()]
 
-    # Actual power keys: per-plant 'actual_power_keys' attribute, else default
-    actual_keys_raw = attrs.get("actual_power_keys") or "active_power"
-    actual_power_keys = [k.strip() for k in str(actual_keys_raw).split(",") if k.strip()]
+    # Actual power keys: plural CSV (Step 16); singular legacy fallback (Step 17)
+    keys_csv = str(attrs.get("actual_power_keys") or "").strip()
+    if keys_csv:
+        actual_power_keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+    else:
+        singular = str(attrs.get("actual_power_key") or "").strip()
+        if singular:
+            if plant_id not in _WARNED_SINGULAR_KEY:
+                log.warning(
+                    "_process_plant: plant %s uses legacy 'actual_power_key' (singular) — "
+                    "migrate to 'actual_power_keys' CSV attribute",
+                    plant_id,
+                )
+                _WARNED_SINGULAR_KEY.add(plant_id)
+            actual_power_keys = [singular]
+        else:
+            actual_power_keys = ["active_power"]  # default
 
     # ── Fetch series concurrently ────────────────────────────────────────────
     setpoint_start_utc = day_start_utc - timedelta(days=30)

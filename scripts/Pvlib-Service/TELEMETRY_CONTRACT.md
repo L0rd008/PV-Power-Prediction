@@ -1,8 +1,10 @@
 # Pvlib-Service — Telemetry Key Contract
 
-*Version 1.2 — 2026-05-13. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+*Version 1.3 — 2026-05-15. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
 
-> **v1.2 changes**: `pvalue_job.py` upgraded to `pvalue-daily-v2` (per-calendar-day P50/P90/P95 percentiles — Phase 2). FDI widget `actualDailyKey` corrected to `total_generation` (real meter) from `total_generation_expected_kwh`. FDI widget now uses generic `forecastDailyKey` for 3-instance (P50/P90/P95) dashboard pattern. FvA widget default `viewMode` changed to `monthly` (full calendar year, 12-bar view with all 3 P bands + future months).
+> **v1.3 changes** (Phase 1.5 + Phases 2/3): `daily_job.py` gains W→kW unit scaling (`active_power_unit` attr) and multi-key support (`actual_power_keys` CSV attr), mirroring `loss_rollup_job.py`. Per-plant timezone (`timezone` attr) now drives daily-record `ts` in both jobs. New §: "Plant SERVER_SCOPE Attributes Read by Service". Daily roll-up rows are stamped at each plant's local midnight (previously always service TZ midnight — no functional change for single-TZ fleets). `set_active_power_unit.py` deprecated — use `tb_config_loader.py` instead.
+
+> **v1.2 changes**: `pvalue_job.py` upgraded to `pvalue-daily-v2` (per-calendar-day P50/P90/P95 percentiles — Phase 2). FDI widget `actualDailyKey` corrected to `actual_daily_energy_kwh`. FDI widget now uses generic `forecastDailyKey` for 3-instance (P50/P90/P95) dashboard pattern. FvA widget default `viewMode` changed to `monthly` (full calendar year, 12-bar view with all 3 P bands + future months).
 
 
 ---
@@ -295,4 +297,35 @@ FDI_MTD% = (Σ actual_kwh[day 1..today] − Σ p50_daily_kwh[day 1..today])
 ```
 
 Note: `forecast_p50_daily` is in MWh; the widget converts to kWh (×1000) before summing to match `total_generation_expected_kwh` units.
+
+---
+
+## Plant SERVER\_SCOPE Attributes Read by Service
+
+The service reads (never writes) the following **SERVER_SCOPE** attributes from each plant asset. All default to a safe value when absent — no attribute is mandatory beyond those in §Required Plant Attributes.
+
+> **Daily roll-up ts note**: since Phase 1.5, `actual_daily_energy_kwh` and `total_generation_expected_kwh` rows are stamped at **each plant's local midnight** (derived from the `timezone` attribute). For a single-timezone fleet this is identical to the service-host midnight. For a multi-timezone fleet, roll-up rows for plants in different zones will carry different `ts` values — aggregate widgets should sum leaf-plant rows rather than relying on a single master `ts`.
+
+| Attribute key | Type | Default | Read by | Purpose |
+|---|---|---|---|---|
+| `actual_power_keys` | string (CSV) | `"active_power"` | `daily_job.py`, `loss_rollup_job.py` | Ordered list of TB telemetry keys to try when fetching meter power. First key that returns non-empty data wins (first-match semantics). Use a comma-separated list when the plant's meter publishes under a non-standard key (e.g. `"EnergyMeter_active_power"` or `"p341_active_power,active_power"`). |
+| `actual_power_key` | string | *(none)* | `daily_job.py`, `loss_rollup_job.py` | **Legacy alias (singular).** Honoured with a one-time WARN log per plant. Migrate to `actual_power_keys` (plural CSV). Will be removed after 90 days from first WARN. |
+| `active_power_unit` | string | `"kW"` | `daily_job.py`, `loss_rollup_job.py` | Unit in which the plant's meter publishes its active power telemetry. Accepted values: `"kW"` (no scaling) or `"W"` (service multiplies the series by 0.001 before integration). A mismatch here will cause `actual_daily_energy_kwh` and all loss-attribution daily keys to be off by 1000×. |
+| `timezone` | string (IANA) | `settings.TZ_LOCAL` | `daily_job.py`, `loss_rollup_job.py` | Plant-local IANA timezone (e.g. `"Asia/Colombo"`). Used to compute the day-boundary `ts` under which the daily roll-up row is written, and to filter the solar window (05:00–19:00 local) for integration. Falls back to the service's `TZ_LOCAL` env var when absent or invalid. |
+| `loss_attribution_enabled` | boolean | `true` | `loss_rollup_job.py` | Per-plant opt-out for loss attribution. Set `false` to suppress all `loss_*` daily writes for this plant without needing to remove `pvlib_enabled`. |
+| `pvlib_enabled` | boolean | `false` | `forecast_service.py`, all jobs | Master opt-in flag. Plant is discovered and processed only when `isPlant=true AND pvlib_enabled=true`. |
+| `setpoint_keys` | string (CSV) | `settings.LOSS_DEFAULT_SETPOINT_KEYS` | `loss_rollup_job.py` | Ordered list of TB keys to query for the active setpoint (curtailment limit). First key with data wins. |
+| `tariff_rate_lkr` | double | *(none)* | `loss_rollup_job.py` | Electricity tariff in LKR/kWh, used to compute `loss_revenue_daily_lkr`. Missing tariff → revenue keys written as -1, `loss_data_source = "warn:no_tariff"`. |
+
+### Attribute-setting tooling
+
+As of v1.3, the canonical way to bulk-set plant attributes is via `scripts/shared/tb_config_loader.py` (reads `plants_master.yml`). The legacy script `scripts/shared/set_active_power_unit.py` is **deprecated** — running it will exit with an error pointing to `tb_config_loader.py`. See `ONBOARDING_GUIDE.md` for the full onboarding workflow.
+
+To audit attribute completeness across the fleet:
+
+```bash
+python scripts/shared/audit_tb_config.py --root-ids <root_uuid> --format table
+# Exit code 1 if any plant has an ERR (missing required attr).
+# WARN for missing optional attrs (tariff, actual_power_keys when active_power absent, etc.).
+```
 
