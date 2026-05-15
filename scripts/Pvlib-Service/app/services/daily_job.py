@@ -108,6 +108,12 @@ async def run_daily_rollup(
     plant_kwh: Dict[str, float] = {}  # plant_id → kwh (or -1 for invalid)
 
     for plant in plants:
+        # ── Step 25: pvlib_services gate — skip daily_energy if disabled ──────
+        if not plant.services.get("daily_energy", True):
+            log.debug("run_daily_rollup: skipping %s (daily_energy=false)", plant.id)
+            stats["skipped"] += 1
+            continue
+
         # ── Fetch plant attrs first (needed for tz, scaling, key resolution) ──
         try:
             attrs = await tb_client.get_asset_attributes(plant.id)

@@ -75,6 +75,12 @@ ATTR_P50_ENERGY   = "p50_energy"              # kWh — annual P50 (SERVER_SCOPE
 ATTR_P90_ENERGY   = "p90_energy"              # kWh — annual P90
 ATTR_P95_ENERGY   = "p95_energy"              # kWh — annual P95
 
+# Step 27: Per-year annual P-value timeseries (ts = 1st-of-year midnight local)
+# Used by revenue_job to compute expected_revenue_yearly_lkr for each historical year.
+KEY_P50_ANNUAL    = "p50_energy_annual"       # kWh — per-year P50 timeseries row
+KEY_P90_ANNUAL    = "p90_energy_annual"       # kWh — per-year P90 timeseries row
+KEY_P95_ANNUAL    = "p95_energy_annual"       # kWh — per-year P95 timeseries row
+
 PVALUE_MODEL_VER  = "pvalue-daily-v2"          # Phase 2: per-calendar-day percentiles
 
 # ERA5 grid resolution — plants within the same cell share a PVGIS fetch
@@ -131,6 +137,10 @@ async def run_pvalue_job(
     # ── 2. Load plant configs and deduplicate by ERA5 grid cell ──────────────
     plant_configs: Dict[str, PlantConfig] = {}
     for plant in plants:
+        # Step 25: pvlib_services gate — skip p_values if disabled
+        if not plant.services.get("p_values", True):
+            log.debug("run_pvalue_job: skipping %s (p_values=false)", plant.id)
+            continue
         try:
             attrs = await tb_client.get_asset_attributes(plant.id)
             if not attrs:
@@ -272,12 +282,64 @@ async def _process_plant(
         "pvalue_target_year": target_year,
     }
 
+    # Step 27: Write per-year P50/P90/P95 as timeseries (ts = 1st-of-year midnight local).
+    # Revenue_job reads KEY_P50_ANNUAL to compute expected_revenue_yearly_lkr for each
+    # historical year without relying on the overwritten SERVER_SCOPE annual attrs.
+    year_ts_ms = int(datetime(target_year, 1, 1, 0, 0, 0, tzinfo=tz).timestamp() * 1000)
+    annual_timeseries = [{"ts": year_ts_ms, "values": {
+        KEY_P50_ANNUAL: round(p50_annual_kwh, 1),
+        KEY_P90_ANNUAL: round(p90_annual_kwh, 1),
+        KEY_P95_ANNUAL: round(p95_annual_kwh, 1),
+    }}]
+
+    # Step 29: Merge daily + mtd records by ts (same local-midnight ts per day).
+    # This halves the post_telemetry call count for the annual job (365 → 365 merged calls).
+    merged_daily_mtd = _merge_records_by_ts(daily_records, mtd_records)
+
     # ── Write to TB ───────────────────────────────────────────────────────────
-    await tb_client.post_telemetry("ASSET", plant_id, daily_records)
+    await tb_client.post_telemetry("ASSET", plant_id, merged_daily_mtd)   # daily + mtd merged
     await tb_client.post_telemetry("ASSET", plant_id, monthly_records)
     await tb_client.post_telemetry("ASSET", plant_id, weekly_records)
-    await tb_client.post_telemetry("ASSET", plant_id, mtd_records)
+    await tb_client.post_telemetry("ASSET", plant_id, annual_timeseries)  # Step 27
     await tb_client.post_attributes("ASSET", plant_id, "SERVER_SCOPE", annual_attrs)
+
+
+# ── Record merge helper (Step 29 — R-A) ──────────────────────────────────────
+
+def _merge_records_by_ts(*record_lists) -> list:
+    """Merge multiple record lists into one, combining records that share the same ts.
+
+    Used to halve post_telemetry call count when daily + mtd rows share local-midnight ts.
+    Asserts (via log.warning) that no two input lists assign different values to the
+    same key at the same ts — overlapping keys from the second list silently win.
+
+    Parameters
+    ----------
+    *record_lists : list of [{"ts": int, "values": dict}, ...]
+        Any number of record lists to merge.
+
+    Returns
+    -------
+    list
+        Merged and ts-sorted list of records.
+    """
+    merged: dict = {}   # ts → values dict
+    for records in record_lists:
+        for rec in records:
+            ts = rec["ts"]
+            vals = rec.get("values", {})
+            if ts not in merged:
+                merged[ts] = {}
+            existing = merged[ts]
+            for k, v in vals.items():
+                if k in existing and existing[k] != v:
+                    log.warning(
+                        "_merge_records_by_ts: key %r at ts=%d has conflicting values "
+                        "(%r vs %r) — later list wins",
+                        k, ts, existing[k], v,
+                    )
+            existing.update(vals)
+    return [{"ts": ts, "values": vals} for ts, vals in sorted(merged.items())]
 
 
 # ── Grid-cell deduplication ──────────────────────────────────────────────────

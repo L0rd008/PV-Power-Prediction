@@ -1,6 +1,8 @@
 # Pvlib-Service — Telemetry Key Contract
 
-*Version 1.3 — 2026-05-15. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+*Version 1.4 — 2026-05-15. This is the source of truth for all telemetry keys written by the service. **Do not rename or remove any key without a 90-day deprecation window.***
+
+> **v1.4 changes** (Phase 4): New `revenue_job.py` writes 5 LKR revenue timeseries keys per plant. New per-year P-value timeseries (`p50_energy_annual`, `p90_energy_annual`, `p95_energy_annual`) written by `pvalue_job.py` for historical revenue computation. New `pvlib_services` JSON attribute gates per-plant service opt-in/out across all writers. New `commissioning_date`, `onboarding_completed`, `onboarding_completed_at`, `tariff_rate_lkr` (now read by `revenue_job.py` in addition to `loss_rollup_job.py`) attributes. Loss-rollup integration upgraded to native-cadence trapezoidal method (fixes ~5× under-count on 5-min-cadence plants). Plant-attrs TTL cache in `ForecastService` (300 s default).
 
 > **v1.3 changes** (Phase 1.5 + Phases 2/3): `daily_job.py` gains W→kW unit scaling (`active_power_unit` attr) and multi-key support (`actual_power_keys` CSV attr), mirroring `loss_rollup_job.py`. Per-plant timezone (`timezone` attr) now drives daily-record `ts` in both jobs. New §: "Plant SERVER_SCOPE Attributes Read by Service". Daily roll-up rows are stamped at each plant's local midnight (previously always service TZ midnight — no functional change for single-TZ fleets). `set_active_power_unit.py` deprecated — use `tb_config_loader.py` instead.
 
@@ -315,7 +317,11 @@ The service reads (never writes) the following **SERVER_SCOPE** attributes from 
 | `loss_attribution_enabled` | boolean | `true` | `loss_rollup_job.py` | Per-plant opt-out for loss attribution. Set `false` to suppress all `loss_*` daily writes for this plant without needing to remove `pvlib_enabled`. |
 | `pvlib_enabled` | boolean | `false` | `forecast_service.py`, all jobs | Master opt-in flag. Plant is discovered and processed only when `isPlant=true AND pvlib_enabled=true`. |
 | `setpoint_keys` | string (CSV) | `settings.LOSS_DEFAULT_SETPOINT_KEYS` | `loss_rollup_job.py` | Ordered list of TB keys to query for the active setpoint (curtailment limit). First key with data wins. |
-| `tariff_rate_lkr` | double | *(none)* | `loss_rollup_job.py` | Electricity tariff in LKR/kWh, used to compute `loss_revenue_daily_lkr`. Missing tariff → revenue keys written as -1, `loss_data_source = "warn:no_tariff"`. |
+| `tariff_rate_lkr` | double | *(none)* | `loss_rollup_job.py`, `revenue_job.py` | Electricity tariff in LKR/kWh. Used by loss rollup for daily LKR keys and by revenue job for monthly/yearly LKR revenue. Missing tariff → all LKR keys written as -1. |
+| `pvlib_services` | JSON object | all-true | all writers | 5-key boolean dict that enables/disables individual service modules per plant. See §`pvlib_services` Attribute below. |
+| `commissioning_date` | string (ISO date) | *(none)* | `revenue_job.py`, `auto_onboard.py` | Date the plant was commissioned (e.g. `"2021-03-15"`). Used to sentinel pre-commissioning yearly rows and to anchor the auto-onboard backfill window. Required when `pvlib_services.revenue=true` or `pvlib_services.loss_attribution=true`. |
+| `onboarding_completed` | boolean | `false` | `auto_onboard.py` | Set to `true` by the Sunday auto-onboard cron after all backfill steps complete successfully. Plants with this attribute `true` are silently skipped on subsequent cron runs. |
+| `onboarding_completed_at` | string (ISO datetime) | *(none)* | `auto_onboard.py` | UTC ISO-8601 timestamp of when onboarding was marked complete. Set atomically alongside `onboarding_completed`. |
 
 ### Attribute-setting tooling
 
@@ -328,4 +334,115 @@ python scripts/shared/audit_tb_config.py --root-ids <root_uuid> --format table
 # Exit code 1 if any plant has an ERR (missing required attr).
 # WARN for missing optional attrs (tariff, actual_power_keys when active_power absent, etc.).
 ```
+
+---
+
+## `pvlib_services` Attribute (Phase 4 — added 2026-05-15)
+
+Set as a **SERVER_SCOPE** JSON string on each plant asset. Controls which service modules run for that plant. All keys default to `true` when the attribute is absent or a key is missing.
+
+```json
+{
+  "physics_live":      true,
+  "daily_energy":      true,
+  "loss_attribution":  true,
+  "p_values":          true,
+  "revenue":           true
+}
+```
+
+| Key | Default | Controls |
+|---|---|---|
+| `physics_live` | `true` | Per-minute `potential_power` writes in `forecast_service.py` |
+| `daily_energy` | `true` | `actual_daily_energy_kwh` in `daily_job.py` |
+| `loss_attribution` | `true` | All `loss_*_daily_*` and lifetime attrs in `loss_rollup_job.py` |
+| `p_values` | `true` | All P-value daily/monthly/annual keys in `pvalue_job.py` |
+| `revenue` | `true` | All `*_revenue_*_lkr` and `actual_yearly_energy_kwh` keys in `revenue_job.py` |
+
+The master `pvlib_enabled` flag still gates all services — setting `pvlib_enabled=false` suppresses everything regardless of this attribute.
+
+To disable revenue for one plant without removing pvlib:
+
+```bash
+# In ThingsBoard UI: SERVER_SCOPE attribute on the plant asset
+pvlib_services = {"physics_live":true,"daily_energy":true,"loss_attribution":true,"p_values":true,"revenue":false}
+```
+
+---
+
+## Per-Year P-Value Timeseries (Phase 4 — added 2026-05-15)
+
+Written by `pvalue_job.py` alongside the existing daily/monthly/weekly keys. Each row is stamped at the **1st-of-year local midnight** for the target calendar year, allowing `revenue_job.py` to look up the historical P50 for any past year.
+
+| Key | Unit | Timestamp | Description |
+|---|---|---|---|
+| `p50_energy_annual` | kWh | 1st Jan midnight local | P50 annual energy for the target year. Same value as the `p50_energy` SERVER_SCOPE attr but retained as a timeseries row so historical years are preserved when the attr is overwritten. |
+| `p90_energy_annual` | kWh | 1st Jan midnight local | P90 annual energy for the target year. |
+| `p95_energy_annual` | kWh | 1st Jan midnight local | P95 annual energy for the target year. |
+
+**Why timeseries instead of attributes?** The SERVER_SCOPE `p50_energy` attribute is overwritten each time `pvalue_job` runs (typically annually). For years 2016–2024, the attribute only ever holds the most recent year's value. `p50_energy_annual` as a timeseries retains all years in the TB telemetry store and can be queried by year using `start`/`end` window.
+
+**Write-call optimisation (Step 29)**: Daily and MTD records that share the same local-midnight `ts` are merged into a single TB API call by `_merge_records_by_ts()`, halving write-call count from 730 to 365 for the annual pvalue job.
+
+---
+
+## Revenue Telemetry (Phase 4 — added 2026-05-15)
+
+Written by `app/services/revenue_job.py`. Requires `tariff_rate_lkr` attribute on the plant asset and `pvlib_services.revenue != false`. Sentinel = `-1` when tariff is missing or data is unavailable.
+
+### Monthly Revenue
+
+Timestamp = local midnight of **1st of the target month**. Written by the `pvlib_revenue_monthly` cron (1st-of-month 00:15 local) and `/admin/run-revenue-monthly`.
+
+| Key | Unit | Source | Description |
+|---|---|---|---|
+| `expected_revenue_monthly_lkr` | LKR | `forecast_p50_monthly` (MWh) × 1000 × tariff | Expected monthly revenue at P50 yield. `-1` if tariff or P50 data missing. |
+| `actual_revenue_monthly_lkr` | LKR | Σ `actual_daily_energy_kwh` × tariff | Actual monthly revenue based on metered daily energy. `-1` if tariff or daily data missing. |
+
+### Yearly Revenue
+
+Timestamp = local midnight of **1st January of the target year**. Written by the `pvlib_revenue_yearly` cron (1st-of-year 00:20 local) and `/admin/run-revenue-yearly`.
+
+| Key | Unit | Source | Description |
+|---|---|---|---|
+| `expected_revenue_yearly_lkr` | LKR | `p50_energy_annual` (kWh) × tariff | Expected annual revenue at P50 yield. `-1` if tariff or annual P50 data missing. |
+| `actual_revenue_yearly_lkr` | LKR | Σ `actual_daily_energy_kwh` × tariff (full year) | Actual annual revenue. `-1` if tariff missing or year predates `commissioning_date`. |
+| `actual_yearly_energy_kwh` | kWh | Σ `actual_daily_energy_kwh` (full year) | Actual annual metered energy. `-1` if year predates `commissioning_date`. |
+
+**Idempotency**: calling either monthly or yearly endpoint twice for the same period produces the same result (overwrite semantics).
+
+**Pre-commissioning sentinel**: if the target year is before the plant's `commissioning_date` year, `actual_revenue_yearly_lkr` and `actual_yearly_energy_kwh` are written as `-1`.
+
+### Admin Endpoints
+
+| Endpoint | Default | Notes |
+|---|---|---|
+| `POST /admin/run-revenue-monthly?year=N&month=M` | Previous month | Recomputes one month for the full fleet |
+| `POST /admin/run-revenue-yearly?year=N` | Previous year | Recomputes one year for the full fleet |
+| `POST /admin/run-revenue-backfill?asset_id=<id>&years_back=10` | 10 years | Full backfill for one plant; idempotent |
+
+---
+
+## Auto-Onboard (Phase 4 — added 2026-05-15)
+
+The Sunday 03:00 cron (`pvlib_autoonboard`, enabled via `AUTO_ONBOARD_ENABLED=true` in `.env`) runs a zero-touch full-historical backfill for every plant that lacks `onboarding_completed=true`.
+
+**Backfill chain per plant:**
+1. `pvalue_job` for each of the last 10 calendar years
+2. `daily_job` from `max(commissioning_date, today−10yr)` to yesterday
+3. `loss_rollup_job` for the same date window (if `pvlib_services.loss_attribution`)
+4. `recompute_lifetime_for_fleet` to rebuild lifetime attributes from the freshly backfilled rows
+5. `revenue_job` backfill (if `pvlib_services.revenue`)
+6. Sets `onboarding_completed=true` + `onboarding_completed_at=<UTC ISO>`
+
+**Per-plant timeout**: `AUTOONBOARD_PER_PLANT_TIMEOUT_S` (default 900 s). On timeout the plant is left un-marked and retried the following Sunday.
+
+**Prometheus counters** (exposed via `/metrics`):
+
+| Metric | Type | Description |
+|---|---|---|
+| `pvlib_autoonboard_attempted_total` | counter | Total plants attempted since process start |
+| `pvlib_autoonboard_completed_total` | counter | Plants successfully onboarded |
+| `pvlib_autoonboard_failed_total` | counter | Plants that failed or timed out |
+| `pvlib_autoonboard_pending` | gauge | Plants currently awaiting onboarding (decremented on success) |
 

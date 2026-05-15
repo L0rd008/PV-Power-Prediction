@@ -11,13 +11,15 @@ Algorithm per plant:
   2. Normalise active_power W→kW via per-plant active_power_unit attribute.
   3. Drop records with value < 0 (sentinels).
   4. If valid samples < LOSS_MIN_VALID_SAMPLES → write -1 sentinels for the day.
-  5. Resample / align to 1-min calendar-day grid; step-hold setpoint to each minute.
-  6. Integrate:
-       gross_loss_kWh   = Σ max(potential − active, 0) × (1/60)
-       curtail_loss_kWh = Σ max(potential − max(ceiling, active), 0) × (1/60)
-                         when setpoint_pct < 99.5, else 0
-       potential_energy_kWh = Σ potential × (1/60)
-       exported_energy_kWh  = Σ active   × (1/60)
+  5. Step-hold setpoint on 1-min grid; integrate potential/actual on native cadence.
+  6. Cadence-correct trapezoidal integration (Step 24):
+       Walk union of potential + actual timestamps; for each adjacent pair (dt ≤ 30 min):
+       avg_kw = 0.5 × (kw[t-1] + kw[t]); energy += avg_kw × dt_h
+       gross_loss_kWh   = Σ max(pot_avg − act_avg, 0) × dt_h
+       curtail_loss_kWh = Σ max(pot_avg − max(ceiling, act_avg), 0) × dt_h
+                         when step-held setpoint_pct < 99.5
+       potential_energy_kWh = Σ pot_avg × dt_h
+       exported_energy_kWh  = Σ act_avg × dt_h
   7. Revenue = loss_kWh × tariff_rate_lkr  (using tariff at compute time).
   8. Write daily timeseries keys + metadata strings at day local-midnight ts.
   9. Update lifetime cumulative attributes (increment or recompute).
@@ -159,6 +161,11 @@ async def run_loss_rollup(
     sem = asyncio.Semaphore(settings.MAX_CONCURRENT_PLANTS)
 
     async def _process(plant):
+        # Step 25: pvlib_services gate — skip loss_attribution if disabled
+        if not plant.services.get("loss_attribution", True):
+            log.debug("run_loss_rollup: skipping %s (loss_attribution=false)", plant.id)
+            return {"skipped": True, "reason": "loss_attribution=false",
+                    "daily_values": _sentinel_daily_values()}
         async with sem:
             return await _process_plant(
                 tb_client, plant.id, day_start_utc, day_end_utc, day_ts_ms, day_start_local
@@ -559,7 +566,7 @@ def _potential_under_active(
     return float(ratio.median()) > POTENTIAL_UNDER_ACTIVE_RATIO
 
 
-def _integrate(
+def _time_weighted_kwh_pair(
     potential: pd.Series,
     actual: pd.Series,
     setpoint: pd.Series,
@@ -567,56 +574,113 @@ def _integrate(
     day_start_utc: datetime,
     day_end_utc: datetime,
 ) -> Dict[str, float]:
-    """Resample to 1-min grid and compute loss integrals.
+    """Cadence-correct trapezoidal integration (Step 24 — N-A).
+
+    Replaces the previous 1-min resample approach which under-counted energy by
+    ~5× on 5-min plants and ~15× on 15-min plants because non-1-min buckets were
+    mapped to NaN after reindex and then skipped.
+
+    Design:
+      - Integrate potential and actual energy independently on their native
+        cadence with trapezoids.
+      - Evaluate loss on actual-meter intervals, interpolating potential to the
+        actual timestamps.
+      - If dt_h > 0.5 h (30 min), treat as an outage gap and skip the interval.
+      - Curtailment ceiling uses step-held setpoint on the 1-min grid so the
+        ceiling is resolved correctly at any native cadence.
 
     Returns dict with six scalar float values (kWh / LKR keys NOT set here —
     revenue is computed after this function based on tariff availability).
     """
-    # 1-minute DatetimeIndex spanning the day
-    idx = pd.date_range(day_start_utc, day_end_utc, freq="1min", inclusive="left", tz="UTC")
-
-    # Resample onto 1-min grid: mean within each minute bucket
-    pot_1min = potential.resample("1min").mean().reindex(idx)
-    act_1min = actual.resample("1min").mean().reindex(idx)
-
-    # Forward-fill setpoint: step-hold the last known value into each minute
+    # ── Step-hold setpoint on 1-min grid (curtailment ceiling lookup) ──────────
+    idx_1min = pd.date_range(day_start_utc, day_end_utc, freq="1min", inclusive="left", tz="UTC")
     if setpoint is not None and len(setpoint) > 0:
-        # Reindex onto the full minute range (which extends back 30 days for lookback)
-        combined_idx = setpoint.index.union(idx)
+        combined_idx = setpoint.index.union(idx_1min)
         sp_full = setpoint.reindex(combined_idx, method="ffill")
-        sp_1min = sp_full.reindex(idx)
+        sp_1min = sp_full.reindex(idx_1min).fillna(100.0)
     else:
-        sp_1min = pd.Series(100.0, index=idx)
+        sp_1min = pd.Series(100.0, index=idx_1min)
 
-    # Fill remaining NaNs in setpoint with 100 (no curtailment)
-    sp_1min = sp_1min.fillna(100.0)
+    def _step_sp(ts: pd.Timestamp) -> float:
+        """Return the step-held setpoint % at a given timestamp."""
+        loc = sp_1min.index.searchsorted(ts, side="right") - 1
+        if loc < 0:
+            return 100.0
+        return float(sp_1min.iloc[loc])
 
-    # Integrate: each 1-min slot contributes value × (1/60) kWh
-    h_per_min = 1.0 / 60.0
+    def _clip(s: pd.Series) -> pd.Series:
+        """Return sorted samples in the target day window."""
+        return s[(s.index >= day_start_utc) & (s.index < day_end_utc)].sort_index()
 
-    gross_loss_kwh = 0.0
-    curtail_loss_kwh = 0.0
-    potential_energy_kwh = 0.0
-    exported_energy_kwh = 0.0
+    potential_day = _clip(potential)
+    actual_day = _clip(actual)
 
-    for ts in idx:
-        pot_v = pot_1min.get(ts, float("nan"))
-        act_v = act_1min.get(ts, float("nan"))
-        sp_v = float(sp_1min.get(ts, 100.0))
+    MAX_GAP_H = 0.5  # skip intervals > 30 min (outage or missing data)
 
-        if not math.isnan(pot_v) and pot_v >= 0:
-            potential_energy_kwh += pot_v * h_per_min
+    def _native_energy_kwh(series: pd.Series) -> float:
+        """Integrate one native-cadence series with trapezoids."""
+        total = 0.0
+        for i in range(1, len(series)):
+            t_prev = series.index[i - 1]
+            t_curr = series.index[i]
+            dt_h = (t_curr - t_prev).total_seconds() / 3600.0
+            if dt_h <= 0 or dt_h > MAX_GAP_H:
+                continue
+            v_prev = float(series.iloc[i - 1])
+            v_curr = float(series.iloc[i])
+            if math.isnan(v_prev) or math.isnan(v_curr) or v_prev < 0 or v_curr < 0:
+                continue
+            total += 0.5 * (v_prev + v_curr) * dt_h
+        return total
 
-        if not math.isnan(act_v) and act_v >= 0:
-            exported_energy_kwh += act_v * h_per_min
+    potential_energy_kwh = _native_energy_kwh(potential_day)
+    exported_energy_kwh  = _native_energy_kwh(actual_day)
+    gross_loss_kwh       = 0.0
+    curtail_loss_kwh     = 0.0
 
-        if not math.isnan(pot_v) and not math.isnan(act_v) and pot_v >= 0 and act_v >= 0:
-            gross_loss_kwh += max(pot_v - act_v, 0.0) * h_per_min
+    if len(potential_day) > 0 and len(actual_day) > 0:
+        # Loss is evaluated on the actual-meter cadence. Potential power is
+        # interpolated to those timestamps so 1-min potential samples do not
+        # split 5-min/15-min actual intervals into zero-width actual pairs.
+        interp_idx = potential_day.index.union(actual_day.index).sort_values()
+        pot_on_actual = (
+            potential_day.reindex(interp_idx)
+            .interpolate(method="time")
+            .reindex(actual_day.index)
+        )
+    else:
+        pot_on_actual = pd.Series(dtype=float)
 
+    for i in range(1, len(actual_day)):
+        t_prev = actual_day.index[i - 1]
+        t_curr = actual_day.index[i]
+        dt_h = (t_curr - t_prev).total_seconds() / 3600.0
+
+        if dt_h <= 0 or dt_h > MAX_GAP_H:
+            continue  # skip zero-width or outage-class gaps
+
+        pot_prev = float(pot_on_actual.get(t_prev, float("nan")))
+        pot_curr = float(pot_on_actual.get(t_curr, float("nan")))
+        act_prev = float(actual_day.iloc[i - 1])
+        act_curr = float(actual_day.iloc[i])
+
+        pot_ok_prev = not math.isnan(pot_prev) and pot_prev >= 0
+        pot_ok_curr = not math.isnan(pot_curr) and pot_curr >= 0
+        act_ok_prev = not math.isnan(act_prev) and act_prev >= 0
+        act_ok_curr = not math.isnan(act_curr) and act_curr >= 0
+
+        if pot_ok_prev and pot_ok_curr and act_ok_prev and act_ok_curr:
+            pot_avg = 0.5 * (pot_prev + pot_curr)
+            act_avg = 0.5 * (act_prev + act_curr)
+            gross_loss_kwh += max(pot_avg - act_avg, 0.0) * dt_h
+
+            # Use midpoint timestamp for step-held setpoint lookup
+            t_mid = t_prev + (t_curr - t_prev) / 2
+            sp_v = _step_sp(t_mid)
             if sp_v < CURTAIL_SETPOINT_THRESHOLD:
                 ceiling_kw = capacity_kw * (sp_v / 100.0)
-                curtail_base_kw = max(ceiling_kw, act_v)
-                curtail_loss_kwh += max(pot_v - curtail_base_kw, 0.0) * h_per_min
+                curtail_base_kw = max(ceiling_kw, act_avg)
+                curtail_loss_kwh += max(pot_avg - curtail_base_kw, 0.0) * dt_h
 
     return {
         KEY_LOSS_GRID_DAILY:       round(gross_loss_kwh, 3),
@@ -627,6 +691,24 @@ def _integrate(
         KEY_LOSS_REVENUE_DAILY:    -1,
         KEY_LOSS_CURTAILREV_DAILY: -1,
     }
+
+
+def _integrate(
+    potential: pd.Series,
+    actual: pd.Series,
+    setpoint: pd.Series,
+    capacity_kw: float,
+    day_start_utc: datetime,
+    day_end_utc: datetime,
+) -> Dict[str, float]:
+    """Dispatch to cadence-correct trapezoidal integration (Step 24).
+
+    The old 1-min-resample body is replaced; the signature is preserved so
+    every call site in _process_plant continues to work unchanged.
+    """
+    return _time_weighted_kwh_pair(
+        potential, actual, setpoint, capacity_kw, day_start_utc, day_end_utc
+    )
 
 
 # ── Lifetime attribute maintenance ────────────────────────────────────────────

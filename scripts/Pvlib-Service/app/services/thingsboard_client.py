@@ -75,12 +75,50 @@ def _cache_key(root_asset_ids: list[str]) -> str:
 
 # ── PlantRef ────────────────────────────────────────────────────────────────
 
+import json as _json
+
+# ── pvlib_services defaults (Step 25 — O-A) ────────────────────────────────
+_DEFAULT_SERVICES: Dict[str, bool] = {
+    "physics_live":     True,
+    "daily_energy":     True,
+    "loss_attribution": True,
+    "p_values":         True,
+    "revenue":          True,
+}
+
+
+def _parse_services(raw) -> Dict[str, bool]:
+    """Parse the pvlib_services SERVER_SCOPE attribute into a services dict.
+
+    Falls back to _DEFAULT_SERVICES (all true) on any parse error so that
+    plants lacking the attribute continue to run every job.
+    """
+    if not raw:
+        return dict(_DEFAULT_SERVICES)
+    if isinstance(raw, dict):
+        parsed = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = _json.loads(raw)
+        except Exception:
+            return dict(_DEFAULT_SERVICES)
+    else:
+        return dict(_DEFAULT_SERVICES)
+    result = dict(_DEFAULT_SERVICES)
+    for k in _DEFAULT_SERVICES:
+        if k in parsed:
+            v = parsed[k]
+            result[k] = bool(v) if not isinstance(v, bool) else v
+    return result
+
+
 @dataclass
 class PlantRef:
     """Lightweight plant descriptor returned by discover_plants()."""
     id: str
     name: str
     parent_ids: Set[str] = field(default_factory=set)
+    services: Dict[str, bool] = field(default_factory=lambda: dict(_DEFAULT_SERVICES))
 
 
 # ── ThingsBoardClient ────────────────────────────────────────────────────────
@@ -455,10 +493,14 @@ class ThingsBoardClient:
 
         if is_plant:
             if pvlib_enabled:
+                services = _parse_services(attrs.get("pvlib_services"))
                 ref = plant_map.setdefault(asset_id, PlantRef(
                     id=asset_id,
                     name=info.get("name", attrs.get("name", asset_id)),
+                    services=services,
                 ))
+                # Update services on revisit (in case of multiple parents)
+                ref.services = services
                 if parent_id:
                     ref.parent_ids.add(parent_id)
                 ancestor_map.setdefault(asset_id, set()).update(path_ancestors)

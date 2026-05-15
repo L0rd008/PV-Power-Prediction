@@ -516,6 +516,55 @@ def start_scheduler(tb_client=None) -> None:
     else:
         log.info("scheduler: P-value cron NOT registered (PVALUE_JOB_ENABLED=false)")
 
+    # Revenue crons (Step 26): gated on REVENUE_JOB_ENABLED
+    if settings.REVENUE_JOB_ENABLED:
+        # 1st-of-month 00:15 local — computes just-finished month
+        scheduler.add_job(
+            run_revenue_monthly_now,
+            trigger="cron",
+            day=1,
+            hour=0,
+            minute=15,
+            misfire_grace_time=3600,
+            max_instances=1,
+            id="pvlib_revenue_monthly",
+            replace_existing=True,
+        )
+        # 1st-of-year 00:20 local — computes just-finished year
+        scheduler.add_job(
+            run_revenue_yearly_now,
+            trigger="cron",
+            month=1,
+            day=1,
+            hour=0,
+            minute=20,
+            misfire_grace_time=86400,
+            max_instances=1,
+            id="pvlib_revenue_yearly",
+            replace_existing=True,
+        )
+        log.info("scheduler: revenue crons registered (1st-of-month 00:15, Jan-1 00:20) %s",
+                 settings.TZ_LOCAL)
+    else:
+        log.info("scheduler: revenue crons NOT registered (REVENUE_JOB_ENABLED=false)")
+
+    # Auto-onboard cron (Step 28): Sunday 03:00 local, gated on AUTO_ONBOARD_ENABLED
+    if settings.AUTO_ONBOARD_ENABLED:
+        scheduler.add_job(
+            run_autoonboard_now,
+            trigger="cron",
+            day_of_week="sun",
+            hour=3,
+            minute=0,
+            misfire_grace_time=7200,
+            max_instances=1,
+            id="pvlib_autoonboard",
+            replace_existing=True,
+        )
+        log.info("scheduler: auto-onboard cron registered at Sun 03:00 %s", settings.TZ_LOCAL)
+    else:
+        log.info("scheduler: auto-onboard cron NOT registered (AUTO_ONBOARD_ENABLED=false)")
+
     scheduler.start()
     log.info(
         "scheduler: started — interval %d min, daily cron 00:05 %s, max_concurrent %d plants",
@@ -523,6 +572,53 @@ def start_scheduler(tb_client=None) -> None:
         settings.TZ_LOCAL,
         settings.MAX_CONCURRENT_PLANTS,
     )
+
+
+async def run_revenue_monthly_now(year: Optional[int] = None, month: Optional[int] = None) -> dict:
+    """Trigger the monthly revenue job (used by /admin/run-revenue-monthly and the cron)."""
+    if not settings.REVENUE_JOB_ENABLED:
+        return {"status": "disabled"}
+    from app.services.revenue_job import run_revenue_monthly
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    now = datetime.now(tz)
+    # Default: previous month
+    if year is None or month is None:
+        first_of_current = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        prev_month_last = first_of_current - timedelta(days=1)
+        year = prev_month_last.year
+        month = prev_month_last.month
+    try:
+        return await run_revenue_monthly(_tb_client, year=year, month=month)
+    except Exception as exc:
+        log.exception("run_revenue_monthly_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+async def run_revenue_yearly_now(year: Optional[int] = None) -> dict:
+    """Trigger the yearly revenue job (used by /admin/run-revenue-yearly and the cron)."""
+    if not settings.REVENUE_JOB_ENABLED:
+        return {"status": "disabled"}
+    from app.services.revenue_job import run_revenue_yearly
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    if year is None:
+        year = datetime.now(tz).year - 1
+    try:
+        return await run_revenue_yearly(_tb_client, year=year)
+    except Exception as exc:
+        log.exception("run_revenue_yearly_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+async def run_autoonboard_now(asset_id: Optional[str] = None) -> dict:
+    """Trigger the auto-onboard cron (used by /admin/run-autoonboard and the Sunday cron)."""
+    if not settings.AUTO_ONBOARD_ENABLED:
+        return {"status": "disabled"}
+    from app.services.auto_onboard import run_autoonboard_now as _run
+    try:
+        return await _run(_tb_client, asset_id=asset_id)
+    except Exception as exc:
+        log.exception("run_autoonboard_now: failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
 
 
 def stop_scheduler() -> None:

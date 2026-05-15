@@ -171,6 +171,33 @@ class Settings(BaseSettings):
     is acceptable for your fleet size.  Plants with many days of history will take
     longer; the cron runs sequentially per plant to avoid overloading TB."""
 
+    # Revenue job (Phase 4 — Step 26)
+    REVENUE_JOB_ENABLED: bool = False
+    """Master flag for the monthly + yearly revenue telemetry job.
+    When true, registers crons at 1st-of-month 00:15 and 1st-of-year 00:20 (local).
+    Default false — enable after verifying tariff_rate_lkr attrs are set on all plants
+    and that revenue_job writes sensible values on /admin/run-revenue-monthly."""
+
+    # Auto-onboard cron (Phase 4 — Step 28)
+    AUTO_ONBOARD_ENABLED: bool = False
+    """When true, registers a Sunday 03:00 local cron that runs the full historical
+    backfill chain (P-values × 10 years, daily-energy, loss-rollup, revenue) for every
+    plant where onboarding_completed != true, then sets onboarding_completed=true.
+    Default false — must be explicitly opted in after smoke-testing on a single plant."""
+
+    AUTOONBOARD_PER_PLANT_TIMEOUT_S: int = 900
+    """Per-plant timeout in seconds for the auto-onboard Sunday cron.
+    Plants that exceed this are left with onboarding_completed unset; the next
+    Sunday cron retries them.  Default 900 s (15 min).  Raise for plants with
+    many years of historical data."""
+
+    # Forecast-service plant-attrs cache (Phase 4 — Step 30)
+    PLANT_ATTRS_CACHE_TTL_S: int = 300
+    """TTL in seconds for the per-plant attribute cache in forecast_service.
+    At 1000 plants × 1-minute cycle the default 300 s reduces attribute fetches
+    from 1.44 M/day to ~288 k/day.  Set to 0 to disable caching (not recommended
+    at fleet scale).  /admin/refresh-plants clears the cache on demand."""
+
     @field_validator("SCHEDULER_INTERVAL_MINUTES", "READ_LAG_SECONDS", "READ_WINDOW_SECONDS", "MAX_CONCURRENT_PLANTS")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -105,6 +106,11 @@ class ForecastService:
     # value: {"weather_station_id": str|None, "p341_device_id": str|None,
     #          "mode": "explicit|contains|naming|none", "miss_count": int}
     _station_resolution_cache: Dict[str, Dict[str, Any]] = {}
+
+    # Step 30: Plant-attrs TTL cache (default 300 s via PLANT_ATTRS_CACHE_TTL_S).
+    # Reduces TB attribute fetches from 1.44 M/day to ~288 k/day at 1000 plants.
+    # key: asset_id; value: (attrs_dict, cached_at_monotonic)
+    _plant_attrs_cache: Dict[str, tuple] = {}
 
     def __init__(self, tb_client, solcast_api_key: Optional[str] = None):
         self._tb = tb_client
@@ -268,6 +274,10 @@ class ForecastService:
 
             async def bounded_compute(plant):
                 async with sem:
+                    # Step 25: pvlib_services gate — skip physics_live if disabled
+                    if not plant.services.get("physics_live", True):
+                        log.debug("bounded_compute: skipping %s (physics_live=false)", plant.id)
+                        return
                     try:
                         res = await self.process_single_asset(plant.id, start, end)
                     except Exception as exc:
@@ -478,7 +488,17 @@ class ForecastService:
           3. Tenant device search by plant-name prefix (zero-config bootstrap)
         Logs station_resolution_mode for ops visibility.
         """
-        attrs = await self._tb.get_asset_attributes(asset_id)
+        # Step 30: TTL cache — reduces TB attr fetches ~5× at steady-state.
+        from app.config import settings as _settings
+        _ttl = _settings.PLANT_ATTRS_CACHE_TTL_S
+        _cached = ForecastService._plant_attrs_cache.get(asset_id)
+        _now = _time.monotonic()
+        if _cached and _ttl > 0 and (_now - _cached[1]) < _ttl:
+            attrs = _cached[0]
+        else:
+            attrs = await self._tb.get_asset_attributes(asset_id)
+            if _ttl > 0:
+                ForecastService._plant_attrs_cache[asset_id] = (attrs, _now)
         if not attrs:
             raise ValueError(f"No attributes found for asset {asset_id}")
 

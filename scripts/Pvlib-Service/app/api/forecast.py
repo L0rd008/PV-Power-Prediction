@@ -11,6 +11,10 @@ Endpoints:
   GET  /health                   — enhanced health with last_cycle info
   POST /admin/run-now            — trigger immediate cycle
   GET  /metrics                  — Prometheus-compatible text metrics
+  POST /admin/run-revenue-monthly   — compute LKR revenue for a calendar month
+  POST /admin/run-revenue-yearly    — compute LKR revenue for a calendar year
+  POST /admin/run-revenue-backfill  — backfill all months + years for one plant
+  POST /admin/run-autoonboard       — run zero-touch onboarding for pending plants
 """
 from __future__ import annotations
 
@@ -256,7 +260,9 @@ async def admin_refresh_plants():
     The next cycle will re-run BFS regardless of the 5-min TTL.
     """
     from app.services.thingsboard_client import _discover_cache
+    from app.services.forecast_service import ForecastService
     _discover_cache.clear()
+    ForecastService._plant_attrs_cache.clear()
     return {"status": "cache_cleared", "triggered_at": datetime.now(timezone.utc).isoformat()}
 
 
@@ -516,6 +522,7 @@ async def metrics():
         _discover_cache_hits_total, _discover_cache_misses_total,
     )
     from app.metrics import data_source_count, plant_failures_total
+    import app.services.auto_onboard as _ao
 
     lines = [
         # ── Scheduler cycle health ────────────────────────────────────────
@@ -599,6 +606,23 @@ async def metrics():
         _p95 = cycle_state.last_cycle_duration_ms or 0
     lines.append(f'pvlib_cycle_duration_p95_ms {_p95}')
 
+    lines += [
+        "",
+        # ── Auto-onboard counters (Step 28) ───────────────────────────────
+        "# HELP pvlib_autoonboard_attempted_total Total auto-onboard plants attempted",
+        "# TYPE pvlib_autoonboard_attempted_total counter",
+        f'pvlib_autoonboard_attempted_total {_ao.autoonboard_attempted_total}',
+        "# HELP pvlib_autoonboard_completed_total Auto-onboard plants successfully completed",
+        "# TYPE pvlib_autoonboard_completed_total counter",
+        f'pvlib_autoonboard_completed_total {_ao.autoonboard_completed_total}',
+        "# HELP pvlib_autoonboard_failed_total Auto-onboard plants that failed or timed out",
+        "# TYPE pvlib_autoonboard_failed_total counter",
+        f'pvlib_autoonboard_failed_total {_ao.autoonboard_failed_total}',
+        "# HELP pvlib_autoonboard_pending Plants awaiting onboarding (gauge)",
+        "# TYPE pvlib_autoonboard_pending gauge",
+        f'pvlib_autoonboard_pending {_ao.autoonboard_pending_gauge}',
+    ]
+
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
@@ -654,4 +678,120 @@ async def admin_run_pvalues_plant(
         raise HTTPException(status_code=400, detail="asset_id is required")
 
     result = await run_pvalue_job_now(target_year=year, plant_ids=[asset_id])
+    return result
+
+
+# ── Revenue admin endpoints (Step 26) ─────────────────────────────────────────
+
+@router.post("/admin/run-revenue-monthly")
+async def admin_run_revenue_monthly(
+    year: Optional[int] = Query(None, description="Calendar year (default: previous month's year)"),
+    month: Optional[int] = Query(None, description="Calendar month 1–12 (default: previous month)"),
+):
+    """Compute and write expected + actual LKR revenue for a calendar month.
+
+    Reads ``forecast_p50_monthly`` (MWh) and ``actual_daily_energy_kwh`` from TB;
+    writes ``expected_revenue_monthly_lkr`` and ``actual_revenue_monthly_lkr`` for
+    every plant where ``pvlib_services.revenue != false``.
+
+    Defaults to the previous calendar month so it can be called on the 1st of
+    each month without arguments (same as the automatic cron).
+    """
+    from app.services.revenue_job import run_revenue_monthly
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    now = datetime.now(tz)
+    if year is None or month is None:
+        prev = now.replace(day=1) - timedelta(days=1)
+        year = year or prev.year
+        month = month or prev.month
+
+    from app.services.thingsboard_client import ThingsBoardClient
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await run_revenue_monthly(tb, year=year, month=month)
+    return result
+
+
+@router.post("/admin/run-revenue-yearly")
+async def admin_run_revenue_yearly(
+    year: Optional[int] = Query(None, description="Calendar year (default: previous year)"),
+):
+    """Compute and write expected + actual LKR revenue for a calendar year.
+
+    Reads ``p50_energy_annual`` timeseries and ``actual_daily_energy_kwh`` from TB;
+    writes ``expected_revenue_yearly_lkr``, ``actual_revenue_yearly_lkr``, and
+    ``actual_yearly_energy_kwh`` for every plant where ``pvlib_services.revenue != false``.
+
+    Defaults to the previous calendar year so it can be called on 1st January
+    without arguments (same as the automatic cron).
+    """
+    from app.services.revenue_job import run_revenue_yearly
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(settings.TZ_LOCAL)
+    if year is None:
+        year = datetime.now(tz).year - 1
+
+    from app.services.thingsboard_client import ThingsBoardClient
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await run_revenue_yearly(tb, year=year)
+    return result
+
+
+@router.post("/admin/run-revenue-backfill")
+async def admin_run_revenue_backfill(
+    asset_id: str = Query(..., description="Asset UUID of the plant to backfill"),
+    years_back: int = Query(10, description="Number of calendar years to backfill (default: 10)"),
+):
+    """Backfill all months + years for a single plant over the last N years.
+
+    Idempotent: running twice produces the same result.  Useful to call
+    immediately after a new plant is onboarded or after ``tariff_rate_lkr``
+    is set for the first time.
+    """
+    if not asset_id:
+        raise HTTPException(status_code=400, detail="asset_id is required")
+
+    from app.services.revenue_job import run_revenue_backfill
+    from app.services.thingsboard_client import ThingsBoardClient
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await run_revenue_backfill(tb, asset_id=asset_id, years_back=years_back)
+    return result
+
+
+# ── Auto-onboard admin endpoints (Step 28) ────────────────────────────────────
+
+@router.post("/admin/run-autoonboard")
+async def admin_run_autoonboard(
+    asset_id: Optional[str] = Query(
+        None,
+        description="Restrict to a single plant UUID.  Omit to process the full fleet.",
+    ),
+):
+    """Run zero-touch onboarding backfill for all pending plants (or one plant).
+
+    For every plant where ``onboarding_completed != true``:
+      1. Runs P-values for each of the last 10 years
+      2. Backfills ``actual_daily_energy_kwh`` from commissioning date to yesterday
+      3. Backfills loss-rollup (if ``pvlib_services.loss_attribution`` enabled)
+      4. Recomputes lifetime loss attributes
+      5. Backfills LKR revenue (if ``pvlib_services.revenue`` enabled)
+      6. Sets ``onboarding_completed=true`` + ``onboarding_completed_at=<ISO>``
+
+    Plants that already have ``onboarding_completed=true`` are silently skipped
+    (idempotent).  Each plant is subject to a per-plant timeout
+    (``AUTOONBOARD_PER_PLANT_TIMEOUT_S``, default 900 s); on timeout the plant
+    is left un-marked and will be retried on the next Sunday cron.
+    """
+    from app.services.auto_onboard import run_autoonboard_now
+    from app.services.thingsboard_client import ThingsBoardClient
+    async with ThingsBoardClient(
+        settings.TB_HOST, settings.TB_USERNAME, settings.TB_PASSWORD
+    ) as tb:
+        result = await run_autoonboard_now(tb, asset_id=asset_id)
     return result
