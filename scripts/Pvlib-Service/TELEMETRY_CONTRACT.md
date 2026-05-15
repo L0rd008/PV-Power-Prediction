@@ -6,7 +6,17 @@
 
 > **v1.3 changes** (Phase 1.5 + Phases 2/3): `daily_job.py` gains W→kW unit scaling (`active_power_unit` attr) and multi-key support (`actual_power_keys` CSV attr), mirroring `loss_rollup_job.py`. Per-plant timezone (`timezone` attr) now drives daily-record `ts` in both jobs. New §: "Plant SERVER_SCOPE Attributes Read by Service". Daily roll-up rows are stamped at each plant's local midnight (previously always service TZ midnight — no functional change for single-TZ fleets). `set_active_power_unit.py` deprecated — use `tb_config_loader.py` instead.
 
-> **v1.2 changes**: `pvalue_job.py` upgraded to `pvalue-daily-v2` (per-calendar-day P50/P90/P95 percentiles — Phase 2). FDI widget `actualDailyKey` corrected to `actual_daily_energy_kwh`. FDI widget now uses generic `forecastDailyKey` for 3-instance (P50/P90/P95) dashboard pattern. FvA widget default `viewMode` changed to `monthly` (full calendar year, 12-bar view with all 3 P bands + future months).
+> **v1.2 changes**: `pvalue_job.py` upgraded to `pvalue-daily-v2` (per-calendar-day P50/P90/P95 percentiles — Phase 2). FDI widget `actualDailyKey` corrected to `actual_daily_energy_kwh`. FDI widget now uses generic `forecastDailyKey` for 3-instance (P50/P90/P95) dashboard pattern. FvA widget default `viewMode` changed to `ytd_weekly` (52 weekly data points with month-name labels, 7-day sensitivity).
+
+### Placeholder Definitions
+
+Command examples in this document use angle brackets (`<...>`) for values you must supply:
+
+| Placeholder | What to replace it with |
+|---|---|
+| `<secret>` | The password for your ThingsBoard user account (`TB_USERNAME`). |
+| `<uuid>` / `<id>` / `<asset_uuid>` | A specific ThingsBoard asset or device UUID. |
+| `<root_uuid>` | The ThingsBoard UUID of your root asset. |
 
 
 ---
@@ -36,8 +46,8 @@ The service **always writes kW** for all power keys regardless of what the plant
 Run the one-shot migration script (idempotent — safe to re-run):
 
 ```bash
-TB_HOST=https://tb.example.com \
-TB_USERNAME=admin@tenant.com \
+TB_HOST=https://windforce.thingsnode.cc \
+TB_USERNAME=PVLib-Service@thingsnode.cc \
 TB_PASSWORD=<secret> \
 python scripts/shared/set_active_power_unit.py
 
@@ -289,16 +299,18 @@ forecast_p50_daily ≥ forecast_p90_daily ≥ forecast_p95_daily   (per day)
 
 Any violation indicates bad PVGIS data for that grid cell — inspect logs and re-run after verifying PVGIS availability.
 
-### FDI MTD Derivation (widget-side, no new service keys)
+### FDI MTD Derivation (widget-side)
 
-The FDI card computes month-to-date deviation by fetching `forecast_p50_daily` for the current month and summing — no dedicated MTD key is written. This keeps the telemetry contract clean and avoids redundant intra-month writes.
+The FDI card v4.0 computes month-to-date deviation by fetching `forecastDailyKey` (e.g. `forecast_p50_daily`) for the current month and summing — it does **not** use the pre-computed `forecast_p50_mtd` key. This gives the widget flexibility to work with any P-level (P50/P90/P95) via the `forecastDailyKey` setting.
+
+> **Note:** The `forecast_p50/p90/p95_mtd` keys **are** still written by `pvalue_job.py` (see §MTD Rolling Timeseries above) and are available for other consumers, but the current FDI v4.0 widget sums daily keys client-side instead.
 
 ```
 FDI_MTD% = (Σ actual_kwh[day 1..today] − Σ p50_daily_kwh[day 1..today])
             / Σ p50_daily_kwh[day 1..today] × 100
 ```
 
-Note: `forecast_p50_daily` is in MWh; the widget converts to kWh (×1000) before summing to match `total_generation_expected_kwh` units.
+Note: `forecast_p50_daily` is in MWh; the widget converts to kWh (×1000) before summing to match `actual_daily_energy_kwh` units.
 
 ---
 

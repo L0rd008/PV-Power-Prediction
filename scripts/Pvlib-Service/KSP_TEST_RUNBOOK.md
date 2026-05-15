@@ -1,10 +1,19 @@
 # KSP_Plant live-test runbook
 
-One-time local smoke test before hand-off to the hosting team. For the full EC2/Docker deployment runbook, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)**.
+One-time local smoke test before hand-off to the hosting team. For the full VPS/Docker deployment runbook, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)**.
 
 Plant under test: `KSP_Plant` (asset UUID `0e4b4070-50ff-11ef-b4ce-d5aee9e495ad`)
 Test host: local Windows box, Python 3.12
 Scope: KSP only (BFS root = KSP's own UUID, no other plants touched)
+
+### Placeholder Definitions
+
+When editing files or running commands, replace these placeholders with actual values:
+
+| Placeholder | What to replace it with |
+|---|---|
+| `<your TB service-account email>` | The email address of your ThingsBoard service user. |
+| `<your TB password>` | The password for that ThingsBoard user. |
 
 ---
 

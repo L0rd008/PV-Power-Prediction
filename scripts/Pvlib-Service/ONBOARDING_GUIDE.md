@@ -4,7 +4,17 @@
 
 This guide covers everything needed to onboard a new plant into Pvlib-Service so that FDI, FvA, Curtailment V5, and Loss Attribution widgets all render correctly. It replaces the older manual API-call workflow and the deprecated `set_active_power_unit.py` script.
 
-> **New in v1.1 (Phase 4):** For EC2/Docker deployment and host-level configuration, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)** (step-by-step copy-paste runbook) and **[HOSTING_REFERENCE.md](HOSTING_REFERENCE.md)** (comprehensive TB attrs, environment variables, and troubleshooting). The auto-onboard feature (`AUTO_ONBOARD_ENABLED=true`) can replace steps 4–7 of this guide for new plants with `commissioning_date` set.
+> **New in v1.1 (Phase 4):** For VPS/Docker deployment and host-level configuration, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)** (step-by-step copy-paste runbook) and **[HOSTING_REFERENCE.md](HOSTING_REFERENCE.md)** (comprehensive TB attrs, environment variables, and troubleshooting). The auto-onboard feature (`AUTO_ONBOARD_ENABLED=true`) can replace steps 4–7 of this guide for new plants with `commissioning_date` set.
+
+### Placeholder Definitions
+
+Throughout this guide, replace angle-bracket placeholders (`<...>`) with your actual values:
+
+| Placeholder | What to replace it with |
+|---|---|
+| `<UUID>` / `<asset_uuid>` / `<uuid>` | The ThingsBoard UUID of the plant asset you are onboarding. |
+| `<secret>` | The password for your ThingsBoard user account (`TB_USERNAME`). |
+| `<root_uuid>` | The ThingsBoard UUID of your root asset. |
 
 ---
 
@@ -63,13 +73,13 @@ Use `tb_config_loader.py` to write the plant's `pvlib_config` blob and flat comp
 # Dry-run to preview what will be written:
 python scripts/shared/tb_config_loader.py \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret> \
+  --user PVLib-Service@thingsnode.cc --password <secret> \
   --plant <asset_uuid> --dry-run
 
 # Apply:
 python scripts/shared/tb_config_loader.py \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret> \
+  --user PVLib-Service@thingsnode.cc --password <secret> \
   --plant <asset_uuid>
 ```
 
@@ -84,7 +94,7 @@ The script computes a SHA-1 hash of the config blob and skips the plant if the h
 ```bash
 python scripts/shared/audit_tb_config.py \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret> \
+  --user PVLib-Service@thingsnode.cc --password <secret> \
   --plant-ids <asset_uuid> --format table
 ```
 
@@ -120,9 +130,9 @@ Common WARN causes (non-blocking, fix before production):
 # Standard onboarding (1 year of historical backfill):
 python scripts/shared/onboard_plant.py \
   --asset-id <uuid> \
-  --pvlib-host http://localhost:8004 \
+  --pvlib-host http://localhost:8000 \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret>
+  --user PVLib-Service@thingsnode.cc --password <secret>
 
 # 2-year backfill:
 python scripts/shared/onboard_plant.py --asset-id <uuid> --years-back 2
@@ -180,8 +190,8 @@ Plants with `isPlant=true && pvlib_enabled=true` but not reachable from any conf
 ```bash
 python scripts/shared/find_orphan_plants.py \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret> \
-  --pvlib-host http://localhost:8004 \
+  --user PVLib-Service@thingsnode.cc --password <secret> \
+  --pvlib-host http://localhost:8000 \
   --format table
 ```
 
@@ -195,7 +205,7 @@ After running `tb_config_loader.py`, the service writes a `pvlib_config_hash` to
 # Report drift only:
 python scripts/shared/find_config_drift.py \
   --host https://windforce.thingsnode.cc \
-  --user admin@tenant.com --password <secret> \
+  --user PVLib-Service@thingsnode.cc --password <secret> \
   --master scripts/shared/plants_master.yml \
   --report-only
 
@@ -239,7 +249,7 @@ When aggregating across plants from parent asset widgets, sum leaf-plant rows ra
 | `forecast_p50_daily` rows per plant | 365 per year |
 | `actual_daily_energy_kwh` sentinel rate | < 5% of calendar days |
 
-Monitor via `GET /metrics` (Prometheus text format). If cycle p95 exceeds 45 s at > 200 plants, increase `MAX_CONCURRENT_PLANTS` (up to ~20 on t4g.small, ~30 on t4g.medium) in `.env`.
+Monitor via `GET /metrics` (Prometheus text format). If cycle p95 exceeds 45 s at > 200 plants, increase `MAX_CONCURRENT_PLANTS` (up to ~20 on a 2 vCPU / 2 GB instance, ~30 on a 4 vCPU / 4 GB instance) in `.env`.
 
 ---
 

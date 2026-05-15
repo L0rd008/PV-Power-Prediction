@@ -69,3 +69,14 @@ data/js_calibration_data.csv
 # Local Pvlib incident diagnostics / ThingsBoard dumps
 scripts/Pvlib-Service/ssk.txt
 scripts/Pvlib-Service/ssk_timeseries.csv
+
+# Additional ignores added by agent
+__pycache__/
+*.pyc
+output/
+scripts/Pvlib-Service/test_out.txt
+data/*.csv
+data/*.txt
+scripts/Pvlib-Service/data/*.csv
+scripts/Pvlib-Service/data/*.txt
+scripts/Pvlib-Service/*.pdf
