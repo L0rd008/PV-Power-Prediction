@@ -1,8 +1,10 @@
 # Pvlib-Service — Plant Onboarding Guide
 
-*Version 1.0 — 2026-05-15*
+*Version 1.1 — 2026-05-15*
 
 This guide covers everything needed to onboard a new plant into Pvlib-Service so that FDI, FvA, Curtailment V5, and Loss Attribution widgets all render correctly. It replaces the older manual API-call workflow and the deprecated `set_active_power_unit.py` script.
+
+> **New in v1.1 (Phase 4):** For EC2/Docker deployment and host-level configuration, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)** (step-by-step copy-paste runbook) and **[HOSTING_REFERENCE.md](HOSTING_REFERENCE.md)** (comprehensive TB attrs, environment variables, and troubleshooting). The auto-onboard feature (`AUTO_ONBOARD_ENABLED=true`) can replace steps 4–7 of this guide for new plants with `commissioning_date` set.
 
 ---
 

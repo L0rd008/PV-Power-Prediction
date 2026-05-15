@@ -54,6 +54,20 @@ Six concrete changes (Steps 8–14 in the plan) to absorb ~1000 plants with hete
 
 Seven steps (16–22 in the plan) covering: the Phase-1.5 fix already done, multi-key support in daily_job, per-plant timezone, orphan-plant detection script, config-drift script, deprecation of `set_active_power_unit.py`. Step 16 is Phase 1.5 — do not duplicate it here.
 
+### Phase 4 — Correctness + Revenue + Atomic Switches + Zero-Touch (lands after Phase 3)
+
+Nine steps (24–32 in the plan). Notable order: **Step 24 (cadence-correct loss integration) is data-correctness and must land alongside Phase 1.5 / Phase 3 Step 16** — without it, every non-1-min plant has wrong curtailment loss numbers.
+
+Highlights:
+- New SERVER_SCOPE JSON `pvlib_services` (5 atomic groups). Default `{all true}`. Each cron checks its group.
+- New `revenue_job.py` writing 4 LKR + 1 kWh yearly key (`expected_revenue_monthly_lkr`, `actual_revenue_monthly_lkr`, `expected_revenue_yearly_lkr`, `actual_revenue_yearly_lkr`, `actual_yearly_energy_kwh`).
+- New per-year p-value timeseries (`p50_energy_annual`, etc) so the 10-year yearly revenue mode can reference historical P50.
+- New weekly Sunday-03:00 `auto_onboard.py` running full historical backfill since `commissioning_date`, marker attr `onboarding_completed=true`. `AUTO_ONBOARD_ENABLED` env flag (default false).
+- `pvalue_job` daily+mtd write merge (single TB record per day instead of two).
+- `forecast_service` fleet-attr cache (TTL 300 s default).
+- `HOSTING_QUICKSTART.md` (5 pages) + `HOSTING_REFERENCE.md` for an operator with Linux/EC2/Docker baseline.
+- Expected vs Actual Revenue widget rewired to consume the new service keys + add `viewMode = "monthly" | "yearly"`.
+
 ## AUTHORITATIVE PLAN
 
 Read this file in full **before any edit**:
@@ -87,6 +101,10 @@ Also read these references (do not edit unless the plan says so):
 7. **Verify Phase 2** following plan §13 Step 15 against two real plants picked by Pasindu.
 8. **Execute Phase 3 (plan §20 Steps 18–22).** Per-plant timezone, orphan plant script, config-drift script, master-file absorption of `set_active_power_unit.py`, documentation updates.
 9. **Verify Phase 3** following plan §20 Step 23.
+10. **Execute Phase 4 (plan §27 Steps 24–32).** Step 24 is critical — land alongside Phase 1.5 / Phase 3 Step 16 if practical. Then Steps 25–32 in order.
+11. **Verify Phase 4** per the per-step verification criteria in the plan and §31 Definition of Done.
+
+You may interleave Phase 4 Step 24 with Phase 1.5 (both are correctness bugs in the same service surface — `daily_job` and `loss_rollup_job` integration logic). All other Phase 4 steps strictly follow Phase 3.
 
 ## HARD RULES (violating any of these is a regression)
 
@@ -146,10 +164,20 @@ Phase 3:
 - `scripts/shared/set_active_power_unit.py` is reduced to a deprecation stub.
 - `TELEMETRY_CONTRACT.md` updated: daily rollup ts is plant-local midnight; the read-attrs table includes `actual_power_keys`, `active_power_unit`, `timezone`.
 
+Phase 4:
+- `loss_rollup_job._integrate` rewritten to cadence-correct trapezoidal integration. A 5-min plant's `potential_energy_daily_kwh` matches `total_generation_expected_kwh` from `daily_job` within 1 %; same for `exported_energy_daily_kwh` vs `actual_daily_energy_kwh`.
+- `pvlib_services` JSON attribute parsed in `discover_plants` and attached to `PlantRef`; each cron skips plants whose corresponding group is `false`; `pvlib_enabled=false` master gate behaviour preserved.
+- `revenue_job.py` writes 5 keys; the Expected vs Actual Revenue widget renders both `monthly` (default) and `yearly` (10-year) view modes against real data.
+- `pvalue_job` writes `p50_energy_annual` / `p90_energy_annual` / `p95_energy_annual` timeseries (per-year) alongside the existing SERVER_SCOPE annual attrs.
+- `pvalue_job` per-plant daily+mtd write count halved via record merge by ts.
+- `forecast_service` plant-attrs cache (TTL configurable; default 300 s) cuts attribute reads from 1.44 M/day to ~288 k/day at 1000 plants.
+- `auto_onboard.py` Sunday-03:00 cron runs full historical backfill chain since `commissioning_date` for every plant where `onboarding_completed != true`, then sets `onboarding_completed=true` + `onboarding_completed_at`. `AUTO_ONBOARD_ENABLED` defaults to `false`.
+- `HOSTING_QUICKSTART.md` is a 5-page copy-paste runbook for an operator with Linux + EC2 + Docker baseline. `HOSTING_REFERENCE.md` covers every TB attribute, every telemetry key, every widget mapping recipe, and troubleshooting.
+
 ## DELIVERABLES (in your final report)
 
 1. A one-paragraph summary of what changed.
-2. A list of files touched, grouped by Phase 1.5 / Phase 1 / Phase 2 / Phase 3.
+2. A list of files touched, grouped by Phase 1.5 / Phase 1 / Phase 2 / Phase 3 / Phase 4.
 3. The exact verification commands you ran with their pass/fail outcome (per phase).
 4. Any deviations from the plan (with one-sentence justification each).
 5. Open questions for Pasindu (max five, grouped).
@@ -161,7 +189,7 @@ Phase 3:
 - Adding new telemetry keys to fix an awkward widget edge case (correct path: extend the widget or ask).
 - Hardcoding plant UUIDs anywhere in service code (correct path: SERVER_SCOPE attrs).
 - Removing legacy aliases from settings.json without the 90-day deprecation cycle.
-- Editing files outside the file index in §9, §14, or §21 of the plan.
+- Editing files outside the file index in §9, §14, §21, or §28 of the plan.
 - Treating Phase 1.5 as "optional" or "cosmetic". It is data-correctness; Phase 1 verification depends on it.
 - Re-using `set_active_power_unit.py` instead of the bulk loader after Phase 2 lands.
 - Skipping verification because "it looks right".

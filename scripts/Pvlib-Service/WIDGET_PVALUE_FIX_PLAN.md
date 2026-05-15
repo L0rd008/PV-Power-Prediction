@@ -780,3 +780,353 @@ Widgets:
 4. **Drift detector severity** — should `find_config_drift.py` exit non-zero on any drift (CI-blocking) or only on schema-breaking drift? Recommendation: non-zero on any drift; provide `--report-only` flag for inspection.
 5. **Phase 1.5 deployment gate** — should the widget v4.0 work (Phase 1) be blocked until the daily_job W→kW fix (Step 16) lands? Argument for yes: FDI/FvA's actuals come from `actual_daily_energy_kwh`; if it's wrong for W-plants, the widget's numbers are wrong even with correct code. Recommendation: ship Step 16 first, then Phase 1.
 
+---
+
+# Addendum C — Phase 4 Curtailment Correctness + Revenue + Atomic-Group Switches + Zero-Touch Hosting (2026-05-14)
+
+Author: Opus 4.7 · User-confirmed taxonomy (2026-05-14): 5 atomic service groups; service writes monthly + yearly LKR revenue keys (yearly view spans 10 years); weekly auto-onboard at Sunday 03:00 with full historical backfill since `commissioning_date`; operator-level hosting doc with Linux/EC2/Docker baseline.
+
+This addendum is additive. It introduces Phase 4 (correctness, revenue, automation, hosting) that lands after Phase 3 verifies.
+
+---
+
+## 24. New gaps and requirements
+
+| # | Gap / Requirement | Severity | Evidence |
+|---|---|---|---|
+| G18 | **`loss_rollup_job._integrate` is cadence-dependent.** Uses `resample("1min").mean().reindex(idx)` → only minute-buckets that have a sample contribute; for 5-min plants the integration loop sums 12 samples/hr × (1/60) = 0.20 × kW per hour, vs the correct ~1.0 × kW per hour. Loss/potential/exported kWh under-reported ~5× on 5-min plants, ~15× on 15-min plants. | **CRITICAL** | `loss_rollup_job.py:578–614`. Compare correct trapezoidal `_time_weighted_kwh` in `daily_job.py:258–283`. |
+| G19 | **Expected vs Actual Revenue widget is unwired to service.** Widget expects DS[0]/DS[1] monthly keys; nothing in pvlib-service writes revenue. Widget falls back to a hardcoded baseline of `2.475`. | High (cosmetic until needed; once enabled, blocking) | `Widgets/Forecasts & Risk/Expected vs Actual Revenue/.js:82–113`. |
+| G20 | **Revenue 10-year view requires actual + expected yearly LKR.** Today's keys: `total_generation_expected_yearly_kwh` (cumulative-by-day) exists; `actual_yearly_energy_kwh` does NOT exist; no LKR yearly keys exist. | High | `daily_job.py:_safe_write_daily`. |
+| G21 | **No atomic service-group switches per plant.** `pvlib_enabled` is binary master only. Operator cannot turn off, e.g., loss-attribution for a plant that has no setpoint device. Every plant runs every job → wasted fetches. | High | `thingsboard_client._visit_node:452–454`. |
+| G22 | **Self-onboarding incomplete.** `run_pvalue_newplants_now` (01:00 daily) covers P-value generation only. No automatic daily-energy / loss-attribution / lifetime-recompute backfill. Phase 2 Step 12 added a 30-day window under `AUTO_ONBOARD_BACKFILL_ENABLED`; the user now wants **full historical** since `commissioning_date`. | High | `scheduler.py:262–307`. |
+| G23 | **Service-attribute re-read cadence is per-cycle (every minute).** Each cycle hits `get_asset_attributes` per plant. With 1000 plants × 1-minute cycle = 1.44 M attr fetches/day. Cache lives 5 min in `_station_resolution_cache` but is for station/device resolution only — full attrs re-fetched every cycle. | Medium | `forecast_service._load_config:472–490`. |
+| G24 | **TB telemetry chunking is partly done.** `forecast_service._build_ac_telemetry` merges keys at the same ts into one record (good). `daily_job._safe_write_daily` posts two separate records (daily + weekly — different ts, justified). `pvalue_job._process_plant` posts 4 separate calls (daily, weekly, monthly, mtd) — but **daily and mtd share the same ts (local midnight per day) and can be merged**, halving the per-plant write count for the annual job. 365 calls → 365 records-in-one-call vs 730 calls. Pure win. | Medium | `pvalue_job.py:276–280`. |
+| G25 | **Zero hoster-facing documentation.** Existing docs (`KSP_TEST_RUNBOOK.md`, `TELEMETRY_CONTRACT.md`, `LOSS_ATTRIBUTION_TELEMETRY_PLAN.md`) target the project author. A new operator with EC2 + Docker familiarity has no end-to-end guide. | High | Project tree. |
+
+G18 is data-correctness and must land alongside Phase 1.5 (W→kW). All curtailment loss values today on non-1-min plants are wrong.
+
+---
+
+## 25. Approaches per Phase-4 requirement (≥ 90 % confidence)
+
+### REQ-N — Cadence-correct loss integration (G18) — CRITICAL
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| N-A | Replace per-minute loop with trapezoidal integration that mirrors `daily_job._time_weighted_kwh`: walk samples in cadence-native order, accumulate `0.5 × (kw[i] + kw[i-1]) × dt_h`, skip gaps > 30 min. Run separately for potential, actual; align on a shared sample-pair timeline for the gross/curtail computations. | Cadence-agnostic; consistent with daily_job (single integration semantics across service); preserves gap-handling. | ~80 LOC rewrite; setpoint step-hold logic still needs the 1-min grid for the curtailment-ceiling lookup. | **9** |
+| N-B | Detect median cadence (`Δt = median(diff(ts))`) and weight each non-NaN minute by `Δt/(1/60)`. | Surgical; small diff. | Wrong when cadence varies within the day (e.g., 5-min daytime + 15-min night). Doesn't fix gap handling. | 6 |
+| N-C | Forward-fill resample (`.ffill()`) then sum × (1/60). | One-line fix. | Over-counts after outages (last known value held across gap), inflating exported energy. | 5 |
+
+**Pick N-A.** Confidence: 93 %. Keep the 1-min grid only for the setpoint step-hold + curtail-ceiling logic; integrate everything else on the native timeline.
+
+### REQ-O — Atomic service-group switches (G21)
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| O-A | New SERVER_SCOPE attribute `pvlib_services` (JSON dict, 5 keys). Read once during `discover_plants` BFS into a `PlantRef.services` dict; each cron checks its own flag before processing the plant. `pvlib_enabled` remains the master gate. | One attribute to set per plant; aligns to existing 5 cron boundaries; default `{all true}` when missing. | One new attribute; cron code must read it. | **9** |
+| O-B | Bit-flag string (`pvlib_services="LDLPR"`). | Tiny payload. | Cryptic; brittle to ordering; bad ergonomics. | 4 |
+| O-C | 5 boolean attributes (`pvlib_physics_live=true`, …). | Simple key-by-key reads. | 5 attrs vs 1; harder to default-set in bulk; visual clutter in TB UI. | 7 |
+
+**Pick O-A.** Confidence: 92 %. Storage shape:
+```json
+{
+  "physics_live":     true,
+  "daily_energy":     true,
+  "loss_attribution": true,
+  "p_values":         true,
+  "revenue":          true
+}
+```
+Default when attribute is absent: all `true` (preserve current behaviour). `pvlib_enabled=false` master gate still skips everything.
+
+### REQ-P — Revenue telemetry (monthly + yearly, G19 + G20)
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| P-A | New `revenue_job.py` writing 4 keys: `expected_revenue_monthly_lkr`, `actual_revenue_monthly_lkr`, `expected_revenue_yearly_lkr`, `actual_revenue_yearly_lkr`. Monthly cron 1st-of-month 00:15; yearly cron 1st-of-year 00:20. Idempotent backfill via `/admin/run-revenue?year=N&month=M`. | Clean separation; widget reads 4 simple keys; service controls tariff snapshotting at compute time. | One new service module + 2 new crons + 4 new TB keys. | **9** |
+| P-B | Piggyback into `daily_job` at end-of-month detection. | No new module. | daily_job bloat; month-boundary detection coupling; harder to backfill. | 6 |
+| P-C | Widget computes (P50_monthly × tariff + Σ actual_daily × tariff). | Zero new service keys. | Widget rewrite; per-cycle 12–365 row fetch; doesn't satisfy "10-year yearly view" without backfill of historical p_values per year. | 5 |
+
+**Pick P-A.** Confidence: 94 %. **10-year yearly view** requires backfill: for each plant, run `pvalue_job` for years `current−9 .. current−1` (writes annual `p50_energy` attribute is overwritten per-run — keep yearly LKR pre-computed in TB rather than relying on the attribute). Service writes one row per year (Jan-1-of-year ts) into `expected_revenue_yearly_lkr` and `actual_revenue_yearly_lkr`. Pre-commissioning years receive sentinel `-1`.
+
+### REQ-Q — Weekly auto-onboard cron (G22)
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| Q-A | Sunday 03:00 local cron `pvlib_autoonboard`. For every discovered plant where `onboarding_completed != true`, run the full backfill chain (P-values for `years_back` years, daily-range from `commissioning_date` to yesterday, loss-rollup from `commissioning_date` to yesterday, recompute-lifetime), then set `onboarding_completed=true` + `onboarding_completed_at=<ISO>`. Idempotent; safe to re-run. | Single weekly job covers all newcomers; zero ops touch after attr setup; preserves the existing daily P-value detector for monitoring. | If many plants added in one week, runtime can exceed an hour. Need a per-plant timeout. | **9** |
+| Q-B | Daily 01:30 cron (extend `run_pvalue_newplants_now`). | Tighter latency. | More frequent fleet attribute reads; same correctness. | 7 |
+| Q-C | On-demand only (no cron). | Maximum control. | Contradicts "hoster touches nothing". | 5 |
+
+**Pick Q-A.** Confidence: 92 %. Bound per-plant runtime to 15 min; on timeout, leave `onboarding_completed` unset so the next Sunday picks it up. Emit Prometheus counter `pvlib_autoonboard_completed_total` and `pvlib_autoonboard_failed_total`.
+
+### REQ-R — TB telemetry chunking by frequency (G24)
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| R-A | In `pvalue_job._process_plant`, merge daily + mtd records by `ts` before posting (both at local midnight per day → 1 call per day instead of 2). Keep weekly + monthly separate (different ts). Add a `_merge_records_by_ts` helper used by any future writer. | 50 % write-call reduction for the annual job; reusable utility; trivial diff. | None. | **9** |
+| R-B | Merge all p_value records by ts and post once. | Smallest payload count. | Different cadences (monthly = 12 rows, weekly = 52, daily = 365) → mismatched ts; TB only accepts shared-ts merges within a single record. Won't work cleanly. | 3 |
+| R-C | Move every write through a service-wide "batch_write" queue. | Generic; back-pressure aware. | Heavy refactor; latency cost; not needed at current scale. | 5 |
+
+**Pick R-A.** Confidence: 95 %. Verify `daily_job._safe_write_daily` already merges daily keys (it does); the weekly write is justified separate (different ts).
+
+### REQ-S — Hosting documentation (G25)
+
+| # | Approach | Strengths | Weaknesses | Score |
+|---|---|---|---|---|
+| S-A | Single mega-doc `ONBOARDING_GUIDE.md`. | One file to read. | Hard to scan; mixes quickstart and deep reference. | 7 |
+| S-B | Two-doc split: `HOSTING_QUICKSTART.md` (5 pages, copy-paste runbook) + `HOSTING_REFERENCE.md` (telemetry contract by area, TB attr schemas, widget mapping, troubleshooting). | Layered reading; operator only needs the first to deploy; reference for issues. | Two files; maintenance overhead minor. | **9** |
+| S-C | Docs subfolder with topic-per-file. | Most structured. | Discoverability burden for first-time reader. | 7 |
+
+**Pick S-B.** Confidence: 93 %. Quickstart targets an operator with `ssh`, `aws cli`, `docker compose`, basic `.env` editing. Reference enumerates every TB attr / telemetry key / widget setting needed; widget mapping captured as a per-widget recipe.
+
+---
+
+## 26. Telemetry contract — Phase 4 additions
+
+**Read attributes (added):**
+
+| Key | Type | Default | Read by |
+|---|---|---|---|
+| `pvlib_services` | JSON dict (5 boolean keys) | `{all true}` | Discovery + every cron |
+| `commissioning_date` | string (ISO date) | none (auto-onboard requires it) | `revenue_job`, `auto_onboard` |
+| `onboarding_completed` | boolean | `false`/absent | `auto_onboard` |
+| `onboarding_completed_at` | string (ISO) | absent | Diagnostic only |
+| `tariff_rate_lkr` | float | none | Already read by `loss_rollup_job`; now also `revenue_job` |
+
+**Written telemetry (added):**
+
+| Key | Type | Unit | Cadence | Description |
+|---|---|---|---|---|
+| `expected_revenue_monthly_lkr` | timeseries | LKR | monthly, ts = 1st-of-month midnight local | `forecast_p50_monthly_kwh × tariff_rate_lkr` |
+| `actual_revenue_monthly_lkr` | timeseries | LKR | monthly, ts = 1st-of-month midnight local | `Σ actual_daily_energy_kwh in month × tariff` |
+| `expected_revenue_yearly_lkr` | timeseries | LKR | yearly, ts = 1st-of-year midnight local | `p50_energy × tariff_rate_lkr` (using year-specific p50 from backfilled `pvalue_job`) |
+| `actual_revenue_yearly_lkr` | timeseries | LKR | yearly, ts = 1st-of-year midnight local | `Σ actual_daily_energy_kwh in year × tariff` |
+| `actual_yearly_energy_kwh` | timeseries | kWh | yearly, ts = 1st-of-year midnight local | `Σ actual_daily_energy_kwh in year` (intermediate for revenue + dashboards) |
+
+No deprecations.
+
+---
+
+## 27. Execution steps — Phase 4
+
+Phase 4 lands after Phase 3 verifies. Step 24 is data-correctness and must land alongside Phase 1.5 / Phase 3 Step 16 if possible.
+
+### Step 24 — Cadence-correct integration in `loss_rollup_job` (N-A) — CRITICAL
+
+File: `app/services/loss_rollup_job.py`
+
+Changes:
+
+1. Add a helper `_time_weighted_kwh_pair(potential, actual, day_start_utc, day_end_utc, setpoint_step_hold_fn, capacity_kw)`:
+   - Walk the union of potential.index and actual.index in ASC order.
+   - For each adjacent pair `(t_prev, t_curr)`, compute `dt_h = (t_curr - t_prev).total_seconds()/3600`. If `dt_h > 0.5`, skip (treat as outage).
+   - Use the interval midpoint to look up the step-held setpoint percentage.
+   - Trapezoidal: `pot_avg = 0.5 × (pot[t_prev] + pot[t_curr])`, same for `act`. Both must be non-NaN and ≥ 0.
+   - Accumulate `potential_energy_kwh += pot_avg × dt_h`, `exported_energy_kwh += act_avg × dt_h`, `gross_loss_kwh += max(pot_avg − act_avg, 0) × dt_h`.
+   - If `sp_pct < 99.5`: `ceiling_kw = capacity_kw × sp_pct/100`; `curtail_base = max(ceiling_kw, act_avg)`; `curtail_loss_kwh += max(pot_avg − curtail_base, 0) × dt_h`.
+2. Replace `_integrate` body with a call to the helper. Keep its return-shape identical so the rest of `_process_plant` is unchanged.
+3. Add unit test (or inline assertion via `/admin/run-loss-rollup` against a known 5-min plant) that energy values move ~5× higher post-fix.
+
+Verification: pick one 1-min plant (e.g. KSP) and one 5-min plant. After fix, KSP results unchanged; 5-min plant `potential_energy_daily_kwh` ≈ daily_job's `total_generation_expected_kwh` for the same day (both should match within 1 %).
+
+### Step 25 — `pvlib_services` JSON attribute + gating (O-A)
+
+Files: `app/services/thingsboard_client.py`, `app/services/forecast_service.py`, `app/services/daily_job.py`, `app/services/loss_rollup_job.py`, `app/services/pvalue_job.py`, plus new `revenue_job.py` (Step 26).
+
+Changes:
+
+1. In `thingsboard_client.PlantRef`, add `services: Dict[str, bool] = field(default_factory=lambda: _DEFAULT_SERVICES)`. Default = all `true`.
+2. In `_visit_node`, after the `pvlib_enabled` truthy check, parse `attrs.get("pvlib_services")` as JSON (with `_DEFAULT_SERVICES` fallback). Attach to `PlantRef`.
+3. Each writer module gets a guard at the per-plant top:
+   - `forecast_service.process_single_asset`: skip if `services["physics_live"]` false; log `skip:physics_live=false`. (Note: this requires plumbing `PlantRef.services` through `process_single_asset` — pass a `services` dict alongside the asset_id from `run_fleet_cycle`.)
+   - `daily_job.run_daily_rollup` per-plant loop: skip if `services["daily_energy"]` false.
+   - `loss_rollup_job._process_plant`: skip if `services["loss_attribution"]` false. (Preserve the existing `loss_attribution_enabled` override as a 6-line legacy adapter that maps to `services["loss_attribution"]`.)
+   - `pvalue_job._process_plant`: skip if `services["p_values"]` false.
+   - `revenue_job` (Step 26): skip if `services["revenue"]` false.
+4. Document defaults in `TELEMETRY_CONTRACT.md` and `HOSTING_REFERENCE.md`.
+
+Idempotent: re-reads on every cron via `discover_plants`, which already caches 5 min.
+
+### Step 26 — Revenue telemetry (P-A)
+
+Files (new): `app/services/revenue_job.py`. Modifies: `app/services/scheduler.py`, `app/api/forecast.py`, `app/config.py`.
+
+Logic:
+
+1. Two public entry points:
+   - `run_revenue_monthly(tb_client, year, month)` — writes `expected_revenue_monthly_lkr` + `actual_revenue_monthly_lkr` for that calendar month, ts = local midnight of 1st-of-month.
+   - `run_revenue_yearly(tb_client, year)` — writes `expected_revenue_yearly_lkr` + `actual_revenue_yearly_lkr` + `actual_yearly_energy_kwh` for that calendar year, ts = local midnight of 1st-of-year.
+2. Algorithm (monthly):
+   - For each plant (gated on `services["revenue"]`):
+     - Read `tariff_rate_lkr`; if missing → write `-1` sentinels, `data_source = "warn:no_tariff"`.
+     - Read `forecast_p50_monthly` row for the target month's 1st-midnight ts. Expected = value × tariff.
+     - Sum `actual_daily_energy_kwh` for every day in the target month (skip `< 0`). Actual = sum × tariff.
+     - Post merged record at the month-ts.
+3. Algorithm (yearly):
+   - Read `p50_energy` SERVER_SCOPE for the target year (pvalue_job writes the current-year value annually; backfilled per-year via Step 27).
+   - Sum `actual_daily_energy_kwh` for every day in the target year.
+   - Multiply both by tariff. Write at 1st-of-year ts.
+   - For years before `commissioning_date`, actual = `-1`. Expected still computed (PVGIS-ERA5 doesn't depend on commissioning).
+4. Crons:
+   - `pvlib_revenue_monthly` cron at 1st-of-month 00:15 local — computes the just-finished month.
+   - `pvlib_revenue_yearly` cron at 1st-of-year 00:20 local — computes the just-finished year.
+5. Admin endpoints:
+   - `POST /admin/run-revenue-monthly?year=N&month=M` (default = previous month).
+   - `POST /admin/run-revenue-yearly?year=N` (default = previous year).
+   - `POST /admin/run-revenue-backfill?asset_id=<id>&years_back=10` (loops the above for each year + each month in that year).
+6. New env flag `REVENUE_JOB_ENABLED` (default `false` until Step 28 enables fleet-wide).
+
+### Step 27 — 10-year P-value backfill (data prerequisite for yearly revenue)
+
+This is an operator action, not a code change. Document in `HOSTING_QUICKSTART.md`:
+
+For each plant during initial onboarding, the auto-onboard cron (Step 28) MUST run `pvalue_job` for each of the last 10 years. PVGIS-ERA5 starts at 2005 → fully covered through 2023. Years 2024 and 2025 fall back to the most recent ERA5 year (2023) for percentile calculation — note this limitation in the contract.
+
+Important: pvalue_job's annual `p50_energy` SERVER_SCOPE attribute is **overwritten per run**. To preserve per-year `p50_energy` values for the yearly revenue computation, the revenue job must write a new SERVER_SCOPE per year: `p50_energy_<year>` (e.g. `p50_energy_2018`). Step 26 algorithm depends on this.
+
+Alternative: write per-year p50 as **timeseries** `p50_energy_annual` with ts = 1st-of-year midnight. Cleaner. Use this instead of per-year attrs.
+
+**Revised contract addition (replacing the per-year attr proposal):**
+
+| Key | Type | Unit | Cadence | Description |
+|---|---|---|---|---|
+| `p50_energy_annual` | timeseries | kWh | yearly, ts = 1st-of-year midnight | Per-year P50 annual yield (the value `p50_energy` was set to that year — preserved historically) |
+| `p90_energy_annual` | timeseries | kWh | yearly | Same for P90 |
+| `p95_energy_annual` | timeseries | kWh | yearly | Same for P95 |
+
+`pvalue_job` writes these alongside the SERVER_SCOPE attrs.
+
+### Step 28 — Weekly auto-onboard cron (Q-A)
+
+Files: `app/services/scheduler.py`, plus new `app/services/auto_onboard.py`.
+
+Logic:
+
+1. `run_autoonboard_now(tb_client)`:
+   - Discover plants via `tb_client.discover_plants(force=True)`.
+   - For each plant where `onboarding_completed != true` (attribute absent or false):
+     - Parse `commissioning_date` (ISO date attr). If missing → skip with WARN.
+     - Run, in sequence (with a 15-min per-plant timeout):
+       a. `pvalue_job.run_pvalue_job(plant_ids=[id], target_year=Y)` for each `Y in range(current_year - 9, current_year + 1)`. Each call writes the yearly p_*_annual timeseries.
+       b. `daily_job.run_daily_rollup(date=D)` for each `D` from `max(commissioning_date, today-3650)` to `yesterday`. (Use the existing `/admin/run-daily-range` path internally.)
+       c. If `services["loss_attribution"]`: `loss_rollup_job.run_loss_rollup(date=D)` for the same range.
+       d. If `services["loss_attribution"]`: `loss_rollup_job.recompute_lifetime_for_fleet(asset_id=id)`.
+       e. If `services["revenue"]`: `revenue_job.run_revenue_backfill(asset_id=id, years_back=10)`.
+     - On success, set SERVER_SCOPE: `onboarding_completed=true`, `onboarding_completed_at=<ISO>`.
+     - On any step failure or timeout, leave attrs unset; next Sunday retries.
+2. Cron registration in `scheduler.start_scheduler` when `AUTO_ONBOARD_ENABLED=true` (new env flag, default `false`):
+   - Trigger: cron, `day_of_week="sun"`, `hour=3`, `minute=0`, `misfire_grace_time=7200`, `max_instances=1`.
+3. Admin endpoint: `POST /admin/run-autoonboard` triggers immediately. `POST /admin/run-autoonboard?asset_id=<id>` for single plant.
+4. Prometheus counters: `pvlib_autoonboard_attempted_total`, `pvlib_autoonboard_completed_total`, `pvlib_autoonboard_failed_total`, gauge `pvlib_autoonboard_pending`.
+
+### Step 29 — pvalue_job daily + mtd write merge (R-A)
+
+File: `app/services/pvalue_job.py`
+
+Changes:
+
+1. Replace the four separate `post_telemetry` calls in `_process_plant` (lines ~276–280) with two calls:
+   - One merged call for `daily + mtd` records (same ts per day, different keys).
+   - Keep `weekly` (different ts) and `monthly` (different ts) separate.
+2. New helper `_merge_records_by_ts(*record_lists)` in `pvalue_job.py` (or a shared util) — defensive merge that asserts all input records at the same ts have non-overlapping keys.
+
+Verification: cycle-time metric `pvalue_job_duration_seconds` should drop ~25 % (fewer HTTP round-trips).
+
+### Step 30 — Cache fleet attrs (G23 mitigation)
+
+File: `app/services/forecast_service.py`
+
+Changes:
+
+1. Introduce `_plant_attrs_cache: Dict[str, Tuple[dict, float]]` keyed by `asset_id` with `(attrs, cached_at_monotonic)`.
+2. New env flag `PLANT_ATTRS_CACHE_TTL_S` (default `300`).
+3. `_load_config` first checks the cache; refreshes on TTL expiry or `force=True`.
+4. `/admin/refresh-plants` already invalidates `_discover_cache`; extend to also clear `_plant_attrs_cache`.
+
+Effect: 1.44 M attr fetches/day → ~1000 plants × (1440/5) = 288 k fetches/day. 80 % reduction. Live `potential_power` cadence still 1 min.
+
+### Step 31 — Hosting documentation (S-B)
+
+Files (new):
+- `M:\Documents\Projects\MAGICBIT\Power-Prediction\scripts\Pvlib-Service\HOSTING_QUICKSTART.md`
+- `M:\Documents\Projects\MAGICBIT\Power-Prediction\scripts\Pvlib-Service\HOSTING_REFERENCE.md`
+
+**Quickstart contents (≈ 5 pages):**
+
+1. Prerequisites — EC2 instance specs (t4g.small minimum for ≤ 200 plants, t4g.medium for 1000), AWS account, Docker installed, ThingsBoard tenant credentials.
+2. Provision EC2 — security-group ports (8004 internal only or behind ALB), SSM Parameter Store secrets path, IAM role with SSM read access.
+3. Initial container start — clone repo, write `.env` from `ec2_userdata.sh` template, `docker compose up -d --build`, verify `curl :8004/health`.
+4. Bootstrap fleet — set root assets in TB via the UI snippet provided; set `pvlib_enabled=true` and `pvlib_services` JSON on each plant via `tb_config_loader.py`; trigger `POST /admin/run-autoonboard` once or wait for Sunday.
+5. Verify dashboards — open KSP_Plant dashboard, confirm FDI / FvA / Curtailment V5 / Loss Attribution / Expected vs Actual Revenue all render.
+6. Smoke-test commands — copy-paste curl recipes for `/health`, `/pvlib/discover`, `/metrics`, `/admin/loss-status`.
+
+**Reference contents:**
+
+1. Telemetry contract by area (link to `TELEMETRY_CONTRACT.md` + a flat summary table).
+2. Per-plant SERVER_SCOPE attribute schema (every key the service reads — name, type, default, semantics, example).
+3. Widget mapping recipes — one section per widget (FDI, FvA, Curtailment V5, Loss Attribution × 5 modes, Expected vs Actual Revenue, Capacity Factor Compliance, Grid Outage Timeline, Risk Summary Panel). Each recipe lists: datasource order, exact telemetry keys, units, settings to set, common gotchas.
+4. Cron schedule + what each job writes.
+5. Troubleshooting — "FDI shows --%", "FvA bands empty in January", "Curtailment shows zero loss when setpoint clearly active", "auto-onboard never completed", etc.
+6. Performance tuning — `MAX_CONCURRENT_PLANTS`, `PLANT_ATTRS_CACHE_TTL_S`, `LOSS_TODAY_PARTIAL_INTERVAL_MIN`, EC2 instance sizing.
+
+The hosting docs are pure prose; no code-block JSON dump beyond what an operator needs.
+
+### Step 32 — Documentation updates (cross-cutting)
+
+- `TELEMETRY_CONTRACT.md` — append §"Plant SERVER_SCOPE attributes read by service" (consolidating `actual_power_keys`, `active_power_unit`, `timezone`, `pvlib_services`, `commissioning_date`, `onboarding_completed`, `onboarding_completed_at`, `tariff_rate_lkr`, `Capacity`/`capacityUnit`, `setpoint_keys`). Append §"Revenue keys" + §"Per-year P-value keys".
+- `ONBOARDING_GUIDE.md` (created in Phase 2) — point readers to `HOSTING_QUICKSTART.md`; keep Phase 2 multi-plant onboarding section.
+- `KSP_TEST_RUNBOOK.md` — add a one-line pointer to `HOSTING_QUICKSTART.md` at the top.
+
+---
+
+## 28. File index — Phase 4 (Sonnet 4.6 will touch)
+
+Service code:
+- `app/services/loss_rollup_job.py` — Step 24 (cadence-correct integration); Step 25 (services gate).
+- `app/services/daily_job.py` — Step 25 (services gate); Step 28 (auto_onboard internal use).
+- `app/services/forecast_service.py` — Step 25 (services gate); Step 30 (attrs cache).
+- `app/services/pvalue_job.py` — Step 25 (services gate); Step 27 (per-year p_*_annual timeseries); Step 29 (write merge).
+- `app/services/scheduler.py` — Step 26 (revenue crons); Step 28 (auto-onboard cron).
+- `app/services/thingsboard_client.py` — Step 25 (PlantRef.services).
+- `app/services/revenue_job.py` — Step 26 (new module).
+- `app/services/auto_onboard.py` — Step 28 (new module).
+- `app/api/forecast.py` — Step 26 (3 admin endpoints); Step 28 (1 admin endpoint).
+- `app/config.py` — `REVENUE_JOB_ENABLED`, `AUTO_ONBOARD_ENABLED`, `PLANT_ATTRS_CACHE_TTL_S`, `AUTOONBOARD_PER_PLANT_TIMEOUT_S`.
+
+Service docs:
+- `TELEMETRY_CONTRACT.md` — Step 32.
+- `HOSTING_QUICKSTART.md` (new) — Step 31.
+- `HOSTING_REFERENCE.md` (new) — Step 31.
+- `ONBOARDING_GUIDE.md` (Phase 2) — pointer line.
+- `KSP_TEST_RUNBOOK.md` — pointer line.
+
+Shared tooling:
+- `scripts/shared/plants_master.schema.json` — add `pvlib_services`, `commissioning_date`.
+- `scripts/shared/tb_config_loader.py` — write `pvlib_services` + `commissioning_date` from master.
+- `scripts/shared/audit_tb_config.py` — validate `pvlib_services` JSON shape; ERR when `commissioning_date` missing for plants with `services["revenue"]=true` or `services["loss_attribution"]=true`.
+
+Widgets:
+- `Forecasts & Risk\Expected vs Actual Revenue\settings.json` — add a `viewMode` setting (`monthly` | `yearly`) and four key settings (`expectedMonthlyKey`, `actualMonthlyKey`, `expectedYearlyKey`, `actualYearlyKey`). README updated.
+- `Forecasts & Risk\Expected vs Actual Revenue\.js` — branch on `viewMode`; fetch the matching pair of TB keys.
+- `Forecasts & Risk\Expected vs Actual Revenue\README.md` — wire to new service keys; document yearly mode.
+
+---
+
+## 29. Out of scope (Phase 4)
+
+- Per-cron staggering (Phase 3 §22 still deferred).
+- Multi-tenant isolation.
+- Webhook-driven auto-onboard (Q-C alternative). Sunday cron is sufficient.
+- Translating widget legacy fallback baselines (`2.475`) — left as-is; once real revenue keys flow, the fallback path is unreachable.
+- PVGIS replacement for years > 2023. Accept the documented 2024+ fallback to 2023 ERA5.
+
+---
+
+## 30. Open questions (Phase 4, non-blocking)
+
+1. **Yearly revenue for 2026 (current year)** — should the widget show a partial-year actual (prorated) like it does for the current-month bar in monthly mode? Recommendation: yes; widget computes proration client-side using the latest `actual_yearly_energy_kwh` timeseries row vs day-of-year.
+2. **Revenue when `tariff_rate_lkr` changes mid-year** — should historical rows be re-stamped at the new tariff or frozen? Recommendation: frozen at the tariff in effect when each row was first written; never recompute history.
+3. **`pvlib_services["physics_live"] = false`** — should the live cycle skip the plant entirely (saves the per-minute discovery + station fetch) or still write sentinels so the absence is observable? Recommendation: skip entirely; ops can observe via `/metrics` `pvlib_skipped_services_total`.
+4. **PVGIS rate-limit headroom for 10-year × 1000-plant backfill** — at year-1 onboarding, that's 10 × 70 cells = 700 PVGIS fetches over ~10–20 min. Acceptable. Document in `HOSTING_QUICKSTART.md`.
+5. **`commissioning_date` discovery** — if a plant doesn't have the attribute, should auto-onboard default to `today − 365d` for the daily/loss backfill, or skip with WARN? Recommendation: skip with WARN; force operator to set the attr.
+

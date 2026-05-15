@@ -1,6 +1,6 @@
 # KSP_Plant live-test runbook
 
-One-time local smoke test before hand-off to the hosting team.
+One-time local smoke test before hand-off to the hosting team. For the full EC2/Docker deployment runbook, see **[HOSTING_QUICKSTART.md](HOSTING_QUICKSTART.md)**.
 
 Plant under test: `KSP_Plant` (asset UUID `0e4b4070-50ff-11ef-b4ce-d5aee9e495ad`)
 Test host: local Windows box, Python 3.12
